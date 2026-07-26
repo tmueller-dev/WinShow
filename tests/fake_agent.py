@@ -146,6 +146,8 @@ class FakeAgent:
         self.received: list[Envelope] = []
         self.acks: list[dict[str, Any]] = []
         self.cancelled: list[str] = []
+        #: (targetId, reason) for each session.cancel, so a test can assert on why.
+        self.cancels: list[tuple[str, str]] = []
         self._seq: dict[str, int] = {}
         self._task: asyncio.Task[None] | None = None
         self._pending: set[asyncio.Task[None]] = set()
@@ -206,6 +208,7 @@ class FakeAgent:
         if op == Op.SESSION_CANCEL:
             target = payload.get("targetId", "")
             self.cancelled.append(target)
+            self.cancels.append((target, str(payload.get("reason", ""))))
             await self.respond(envelope.id or "", op, {"targetId": target, "cancelled": True})
             return
 

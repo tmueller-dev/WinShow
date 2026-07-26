@@ -485,6 +485,9 @@ class AgentSession:
     async def _on_exec_output(self, entry: InflightRequest, payload: dict[str, Any]) -> None:
         chunk = ExecOutputEvent.model_validate(payload)
         buffer = entry.stdout if chunk.stream == "stdout" else entry.stderr
+        overflowed_before = bool(
+            (entry.stdout and entry.stdout.truncated) or (entry.stderr and entry.stderr.truncated)
+        )
         if buffer is not None:
             buffer.append(chunk.data)
         if chunk.stream == "stdout":
@@ -498,6 +501,28 @@ class AgentSession:
         # §9.3: acknowledge eagerly on consuming a chunk. The window exists to bound
         # memory, not to pace the sender, so batching acks only risks stalling it.
         await self._send_ack(entry)
+
+        # §7.3 of the architecture: on server-side buffer overflow the server cancels the
+        # request and returns what it has, flagged as truncated. `buffer_limit` is the
+        # cancellation reason the protocol reserves for exactly this. Without it the
+        # process keeps running and producing output nobody will ever see, which wastes
+        # the Windows host's CPU on a result already known to be incomplete.
+        if not overflowed_before and not entry.buffer_limit_hit:
+            now_overflowed = bool(
+                (entry.stdout and entry.stdout.truncated)
+                or (entry.stderr and entry.stderr.truncated)
+            )
+            if now_overflowed:
+                entry.buffer_limit_hit = True
+                log.warning(
+                    "exec.buffer_limit",
+                    extra={
+                        "event": "exec.buffer_limit",
+                        "request_id": entry.id,
+                        "cap_bytes": self.settings.max_buffered_output_bytes,
+                    },
+                )
+                self._spawn(self._cancel_quietly(entry.id, CancelReason.BUFFER_LIMIT))
 
         callback = self._output_callbacks.get(entry.id)
         if callback is not None:

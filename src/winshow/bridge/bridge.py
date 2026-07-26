@@ -21,7 +21,7 @@ from typing import Any
 
 from winshow.bridge.session import AgentSession, OutputCallback
 from winshow.config import Settings
-from winshow.errors import AgentUnavailable, WinShowError
+from winshow.errors import AgentUnavailable, WinShowError, WireErrorCode
 from winshow.observability.logging import get_logger
 from winshow.observability.metrics import (
     record_reconnect,
@@ -32,6 +32,12 @@ from winshow.observability.metrics import (
 __all__ = ["AgentBridge"]
 
 log = get_logger(__name__)
+
+#: §8.3: AGENT_BUSY is retryable and the server SHOULD retry "after a short delay, with a
+#: bounded number of attempts". Bounded is the operative word — unbounded retries turn a
+#: saturated host into a busier one.
+AGENT_BUSY_ATTEMPTS = 3
+AGENT_BUSY_BACKOFF_SECONDS = 0.25
 
 
 class AgentBridge:
@@ -169,22 +175,46 @@ class AgentBridge:
         progress_token: str | int | None = None,
         trace: str | None = None,
     ) -> dict[str, Any]:
-        """Run one operation against the connected agent, recording the outcome."""
-        session = await self.require_session()
+        """Run one operation against the connected agent, recording the outcome.
+
+        `AGENT_BUSY` is retried a bounded number of times (§8.3). That is safe even for
+        `exec.start`, which §8.7 forbids anyone to retry: `AGENT_BUSY` is the agent
+        stating that it *rejected* the request rather than ran it, so there is no
+        ambiguity about whether the command already executed — which is the entire reason
+        that rule exists.
+        """
         started = time.monotonic()
         outcome = "ok"
         try:
-            return await session.request(
-                op,
-                payload,
-                timeout_ms=timeout_ms,
-                on_output=on_output,
-                progress_token=progress_token,
-                trace=trace,
-            )
-        except WinShowError as exc:
-            outcome = exc.code
-            raise
+            for attempt in range(AGENT_BUSY_ATTEMPTS):
+                session = await self.require_session()
+                try:
+                    return await session.request(
+                        op,
+                        payload,
+                        timeout_ms=timeout_ms,
+                        on_output=on_output,
+                        progress_token=progress_token,
+                        trace=trace,
+                    )
+                except WinShowError as exc:
+                    last = attempt == AGENT_BUSY_ATTEMPTS - 1
+                    if exc.code != WireErrorCode.AGENT_BUSY or last:
+                        outcome = exc.code
+                        raise
+                    delay = AGENT_BUSY_BACKOFF_SECONDS * (2**attempt)
+                    log.info(
+                        "agent.busy_retry",
+                        extra={
+                            "event": "agent.busy_retry",
+                            "op": op,
+                            "attempt": attempt + 1,
+                            "delay_s": delay,
+                        },
+                    )
+                    await asyncio.sleep(delay)
+            # Unreachable: the loop either returns or raises on its final attempt.
+            raise AssertionError("retry loop fell through")
         except asyncio.CancelledError:
             outcome = "cancelled"
             raise

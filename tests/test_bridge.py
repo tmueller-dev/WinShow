@@ -182,6 +182,65 @@ class TestExecution:
         assert caught.value.code == "AGENT_TIMEOUT"
 
 
+class TestLimits:
+    async def test_agent_busy_is_retried_a_bounded_number_of_times(self, linked: Any) -> None:
+        # §8.3: AGENT_BUSY is retryable and the server SHOULD retry after a short delay.
+        # Safe even for exec.start, because AGENT_BUSY means the agent rejected the
+        # request rather than ran it.
+        bridge, agent, _ = linked
+        attempts = {"n": 0}
+
+        def handler(_id: str, _p: dict[str, Any]) -> Any:
+            attempts["n"] += 1
+            if attempts["n"] < 3:
+                return WireError.of(WireErrorCode.AGENT_BUSY, "at capacity")
+            return {"path": "eventually", "entries": [], "total": 0}
+
+        agent.on(Op.FS_LIST, handler)
+        result = await bridge.call(Op.FS_LIST, {"path": "C:\\"})
+        assert result["path"] == "eventually"
+        assert attempts["n"] == 3
+
+    async def test_agent_busy_eventually_gives_up(self, linked: Any) -> None:
+        # Bounded is the operative word: unbounded retries turn a saturated host into a
+        # busier one.
+        bridge, agent, _ = linked
+        agent.on(
+            Op.FS_LIST,
+            lambda _id, _p: WireError.of(WireErrorCode.AGENT_BUSY, "still at capacity"),
+        )
+        with pytest.raises(WinShowError) as caught:
+            await bridge.call(Op.FS_LIST, {"path": "C:\\"})
+        assert caught.value.code == WireErrorCode.AGENT_BUSY
+        assert caught.value.retryable is True
+
+    async def test_server_buffer_overflow_cancels_with_buffer_limit(
+        self, settings: Settings
+    ) -> None:
+        # §7.3 of the architecture: on overflow the server cancels the request and returns
+        # what it has, flagged as truncated. Without the cancel the process keeps running
+        # and producing output nobody will ever see.
+        tight = settings.model_copy(update={"max_buffered_output_bytes": 64})
+        session, agent, _ws, serving = await connected_session(tight)
+        bridge = AgentBridge(tight)
+        await bridge.attach(session)
+        agent.serve_exec(chunks=[("stdout", "x" * 50)] * 10, delay=0.005)
+
+        result = await bridge.call(Op.EXEC_START, {"argv": ["chatty"]})
+        assert result["truncated"] is True
+
+        assert await agent.wait_for(
+            lambda: any(reason == "buffer_limit" for _target, reason in agent.cancels)
+        ), f"no buffer_limit cancellation was sent; saw {agent.cancels}"
+        # Sent once, not on every subsequent chunk.
+        buffer_cancels = [c for c in agent.cancels if c[1] == "buffer_limit"]
+        assert len(buffer_cancels) == 1
+
+        await agent.stop()
+        serving.cancel()
+        await asyncio.gather(serving, return_exceptions=True)
+
+
 class TestDisconnect:
     async def test_execution_returns_partial_output(self, settings: Settings) -> None:
         # §8.2 of the architecture: a truncated build log is useful, so what arrived is

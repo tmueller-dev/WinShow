@@ -135,6 +135,9 @@ class InflightRequest:
     #: Set when the agent reported a slow stage-2 policy review (§5.5).
     under_review: bool = False
     cancelling: bool = False
+    #: Set once the server-side buffer overflowed and a `buffer_limit` cancellation was
+    #: dispatched, so the cancel is sent once rather than on every subsequent chunk.
+    buffer_limit_hit: bool = False
 
     def note_event_seq(self, seq: int) -> None:
         """Enforce the gapless-ordering rule for the agent's event stream (§8.2).
