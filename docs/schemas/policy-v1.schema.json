@@ -1,0 +1,309 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://winshow.example/schemas/policy-v1.schema.json",
+  "title": "WinShow agent policy, version 1",
+  "description": "Validates policy.toml after TOML-to-JSON conversion. The policy is the agent's sole authorization mechanism; see docs/04-agent-policy.md. additionalProperties is false at every level on purpose: a typo in a security control must be a load failure, not a silently ignored key.",
+
+  "type": "object",
+  "required": ["schemaVersion", "connection", "fs", "exec"],
+  "additionalProperties": false,
+
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "policyVersion": {
+      "type": "string",
+      "description": "Free-form operator label, surfaced in the handshake summary so the operator can confirm which revision is live."
+    },
+    "denialDisclosure": {
+      "type": "string",
+      "enum": ["explicit", "notfound"],
+      "default": "explicit",
+      "description": "'explicit' names the rule that denied. 'notfound' reports a path outside every root as non-existent, at the cost of making the operator's own rules harder to debug."
+    },
+    "connection": { "$ref": "#/$defs/connection" },
+    "limits": { "$ref": "#/$defs/limits" },
+    "fs": { "$ref": "#/$defs/fs" },
+    "exec": { "$ref": "#/$defs/exec" },
+    "modelReview": { "$ref": "#/$defs/modelReview" },
+    "proc": { "$ref": "#/$defs/proc" },
+    "logging": { "$ref": "#/$defs/logging" }
+  },
+
+  "$defs": {
+    "windowsPath": {
+      "type": "string",
+      "minLength": 2,
+      "pattern": "^([A-Za-z]:[\\\\/]|\\\\\\\\)",
+      "description": "Absolute: drive-absolute or UNC. Relative and drive-relative forms are rejected at load."
+    },
+
+    "anchoredRegex": {
+      "type": "string",
+      "minLength": 1,
+      "description": "A regular expression. The agent MUST reject any pattern used for an allow decision that is not anchored at both ends."
+    },
+
+    "connection": {
+      "type": "object",
+      "required": ["serverUrl", "agentId", "tokenFile"],
+      "additionalProperties": false,
+      "properties": {
+        "serverUrl": {
+          "type": "string",
+          "pattern": "^wss?://",
+          "description": "ws:// is only permitted for loopback, or with insecure = true."
+        },
+        "agentId": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9._-]+$" },
+        "tokenFile": { "$ref": "#/$defs/windowsPath" },
+        "insecure": { "type": "boolean", "default": false },
+        "tlsTrust": { "type": "string", "enum": ["system", "ca-bundle", "pin"], "default": "system" },
+        "caBundle": { "$ref": "#/$defs/windowsPath" },
+        "spkiPins": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^sha256/[A-Za-z0-9+/=]+$" },
+          "description": "At least two SHOULD be configured, or a certificate rotation bricks the agent."
+        },
+        "proxy": { "type": "string" },
+        "noProxy": { "type": "array", "items": { "type": "string" } },
+        "heartbeatTimeoutMs": { "type": "integer", "minimum": 5000, "default": 60000 },
+        "reconnectMinMs": { "type": "integer", "minimum": 100, "default": 1000 },
+        "reconnectMaxMs": { "type": "integer", "minimum": 1000, "default": 60000 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "tlsTrust": { "const": "ca-bundle" } }, "required": ["tlsTrust"] },
+          "then": { "required": ["caBundle"] }
+        },
+        {
+          "if": { "properties": { "tlsTrust": { "const": "pin" } }, "required": ["tlsTrust"] },
+          "then": { "required": ["spkiPins"] }
+        }
+      ]
+    },
+
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxFrameBytes": { "type": "integer", "minimum": 65536, "maximum": 8388608 },
+        "maxConcurrentRequests": { "type": "integer", "minimum": 1 },
+        "maxConcurrentProcesses": { "type": "integer", "minimum": 0 },
+        "maxExecMillis": { "type": "integer", "minimum": 1000 },
+        "maxOutputBytesPerExec": { "type": "integer", "minimum": 1024 },
+        "maxReadBytes": { "type": "integer", "minimum": 1024 },
+        "maxGlobResults": { "type": "integer", "minimum": 1 },
+        "maxGrepMatches": { "type": "integer", "minimum": 1 },
+        "maxHashBytes": { "type": "integer", "minimum": 0 },
+        "ackWindowChunks": { "type": "integer", "minimum": 1 },
+        "ackWindowBytes": { "type": "integer", "minimum": 65536 },
+        "maxSendQueueBytes": { "type": "integer", "minimum": 65536 },
+        "sendStallTimeoutMs": { "type": "integer", "minimum": 1000 }
+      }
+    },
+
+    "fs": {
+      "type": "object",
+      "required": ["enabled", "readRoots"],
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "writeEnabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Write operations are a later phase. A policy that sets this true against an agent without the fs.write capability is a load-time warning, not an error."
+        },
+        "followLinks": { "type": "boolean", "default": false },
+        "allowAlternateDataStreams": { "type": "boolean", "default": false },
+        "defaultAnsiEncoding": { "type": "string", "enum": ["cp1252", "cp850", "ansi", "oem", "utf-8"], "default": "cp1252" },
+        "auditReads": { "type": "boolean", "default": true },
+        "readRoots": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/windowsPath" },
+          "description": "Containment is component-wise and ordinal case-insensitive, evaluated against the OS-final path after link and 8.3 resolution."
+        },
+        "denyGlobs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Deny always beats allow."
+        },
+        "rootOverrides": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path"],
+            "additionalProperties": false,
+            "properties": {
+              "path": { "$ref": "#/$defs/windowsPath" },
+              "maxReadBytes": { "type": "integer", "minimum": 1024 },
+              "allowedExtensions": { "type": "array", "items": { "type": "string", "pattern": "^\\." } }
+            }
+          }
+        }
+      }
+    },
+
+    "exec": {
+      "type": "object",
+      "required": ["enabled", "mode"],
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "mode": {
+          "type": "string",
+          "enum": ["allowlist", "disabled"],
+          "description": "There is deliberately no 'any' mode. An agent that runs arbitrary commands has no policy."
+        },
+        "defaultTimeoutMs": { "type": "integer", "minimum": 1000 },
+        "defaultCwd": { "$ref": "#/$defs/windowsPath" },
+        "cwdRoots": { "type": "array", "items": { "$ref": "#/$defs/windowsPath" } },
+        "shellsAllowed": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["cmd", "powershell", "pwsh"] },
+          "description": "shell='none' needs no entry; it is always available when exec is enabled."
+        },
+        "allowUnsafeCmdMetacharacters": { "type": "boolean", "default": false },
+        "executableSearchPath": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/windowsPath" },
+          "description": "Bare executable names resolve against this list, never against the ambient PATH."
+        },
+        "envMode": { "type": "string", "enum": ["overlay", "clean"], "default": "overlay" },
+        "envAllow": { "type": "array", "items": { "type": "string" } },
+        "envAllowSensitive": { "type": "boolean", "default": false },
+        "envRedact": { "type": "array", "items": { "type": "string" } },
+        "envBase": { "type": "array", "items": { "type": "string" } },
+        "gracePeriodMs": { "type": "integer", "minimum": 0, "default": 2000 },
+        "detachOnDisconnect": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Allow rule ids whose processes survive a disconnect. At-your-own-risk; empty by default."
+        },
+        "allow": { "type": "array", "items": { "$ref": "#/$defs/allowRule" } },
+        "deny": { "type": "array", "items": { "$ref": "#/$defs/denyRule" } }
+      }
+    },
+
+    "allowRule": {
+      "type": "object",
+      "required": ["id"],
+      "additionalProperties": false,
+      "description": "Either an executable rule (shell = none) or a shell rule. The two shapes are mutually exclusive.",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "pattern": "^[a-z0-9][a-z0-9-]*$" },
+        "executable": { "$ref": "#/$defs/windowsPath" },
+        "shell": { "type": "string", "enum": ["cmd", "powershell", "pwsh"] },
+        "argv": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Exact positional template. A token of the form {name} is a placeholder validated by the matching entry in `placeholders`."
+        },
+        "argvPrefix": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "argv must start with exactly these tokens; anything may follow."
+        },
+        "argvDeny": { "type": "array", "items": { "type": "string" } },
+        "placeholders": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/anchoredRegex" }
+        },
+        "scriptPatterns": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/anchoredRegex" },
+          "description": "For shell rules: the whole script must match one of these anchored patterns."
+        },
+        "maxTimeoutMs": { "type": "integer", "minimum": 1000 },
+        "maxOutputBytes": { "type": "integer", "minimum": 1024 },
+        "cwdRoots": { "type": "array", "items": { "$ref": "#/$defs/windowsPath" } },
+        "modelReview": {
+          "type": "boolean",
+          "description": "Override the global modelReview.enabled for this rule. Setting it false skips stage 2; setting it true forces stage 2 even when the global default is off."
+        }
+      },
+      "oneOf": [
+        { "required": ["executable"], "not": { "required": ["shell"] } },
+        { "required": ["shell", "scriptPatterns"], "not": { "required": ["executable"] } }
+      ]
+    },
+
+    "denyRule": {
+      "type": "object",
+      "required": ["id", "reason"],
+      "additionalProperties": false,
+      "description": "At least one matcher must be present. Deny rules are evaluated after allow rules and override them.",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "pattern": "^[a-z0-9][a-z0-9-]*$" },
+        "reason": { "type": "string", "minLength": 1 },
+        "executableRegex": { "type": "string", "minLength": 1 },
+        "argvRegex": { "type": "string", "minLength": 1 },
+        "scriptRegex": { "type": "string", "minLength": 1 },
+        "cwdRegex": { "type": "string", "minLength": 1 }
+      },
+      "anyOf": [
+        { "required": ["executableRegex"] },
+        { "required": ["argvRegex"] },
+        { "required": ["scriptRegex"] },
+        { "required": ["cwdRegex"] }
+      ]
+    },
+
+    "modelReview": {
+      "type": "object",
+      "required": ["enabled"],
+      "additionalProperties": false,
+      "description": "Stage 2. Runs only after stage 1 has already allowed a request, and can only ever deny. It never widens what the deterministic rules permitted.",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "failMode": {
+          "type": "string",
+          "enum": ["closed", "open"],
+          "default": "closed",
+          "description": "What to do when the reviewer errors or times out. 'closed' denies, which makes the agent unavailable if the model stalls; 'open' allows, which means a stalled model silently disables stage 2."
+        },
+        "timeoutMs": { "type": "integer", "minimum": 100, "default": 8000 },
+        "endpoint": {
+          "type": "string",
+          "description": "Where the local reviewer runs. Loopback or a named pipe; it MUST NOT be a remote address."
+        },
+        "model": { "type": "string" },
+        "appliesTo": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["exec.start", "fs.read", "fs.grep", "fs.glob", "fs.list", "fs.stat"] },
+          "default": ["exec.start"],
+          "description": "Which operations are reviewed. Reviewing every filesystem call makes the agent unusably slow; exec.start is where the leverage is."
+        },
+        "maxRequestChars": { "type": "integer", "minimum": 256, "default": 8192 },
+        "auditVerdicts": { "type": "boolean", "default": true }
+      }
+    },
+
+    "proc": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "listEnabled": { "type": "boolean", "default": false },
+        "includeCommandLine": {
+          "type": "boolean",
+          "default": false,
+          "description": "Command lines routinely contain credentials, so this is gated separately from listEnabled."
+        },
+        "killEnabled": { "type": "boolean", "default": false }
+      }
+    },
+
+    "logging": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "level": { "type": "string", "enum": ["debug", "info", "warn", "error"], "default": "info" },
+        "file": { "$ref": "#/$defs/windowsPath" },
+        "auditFile": { "$ref": "#/$defs/windowsPath" },
+        "maxFileBytes": { "type": "integer", "minimum": 65536 },
+        "maxFiles": { "type": "integer", "minimum": 1 },
+        "eventLog": { "type": "boolean", "default": true },
+        "redactPatterns": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}

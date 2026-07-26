@@ -1,0 +1,131 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://winshow.example/schemas/wsap-v1-errors.schema.json",
+  "title": "WSAP/1 error object",
+  "description": "The `e` member of an `err` message. Normative companion to docs/03-agent-protocol.md section 7.",
+
+  "$defs": {
+    "errorCode": {
+      "description": "Stable, append-only enumeration. A receiver encountering an unknown code MUST treat it as class 'internal', retryable false.",
+      "type": "string",
+      "enum": [
+        "UNAUTHENTICATED",
+        "INCOMPATIBLE_VERSION",
+        "SUPERSEDED",
+        "MALFORMED_MESSAGE",
+        "FRAME_TOO_LARGE",
+        "UNSUPPORTED_OPERATION",
+        "NOT_IMPLEMENTED",
+        "INVALID_ARGUMENT",
+        "POLICY_DENIED",
+        "POLICY_UNAVAILABLE",
+        "NOT_FOUND",
+        "ACCESS_DENIED",
+        "IS_A_DIRECTORY",
+        "NOT_A_DIRECTORY",
+        "INVALID_PATH",
+        "PATH_TOO_LONG",
+        "SHARING_VIOLATION",
+        "DISK_FULL",
+        "IO_ERROR",
+        "EXEC_NOT_FOUND",
+        "SPAWN_FAILED",
+        "ENCODING_ERROR",
+        "RESOURCE_EXHAUSTED",
+        "AGENT_BUSY",
+        "TIMEOUT",
+        "CANCELLED",
+        "INTERNAL_ERROR"
+      ]
+    },
+
+    "errorClass": {
+      "type": "string",
+      "enum": [
+        "transport",
+        "auth",
+        "policy",
+        "os",
+        "limit",
+        "timeout",
+        "cancelled",
+        "internal",
+        "argument"
+      ]
+    },
+
+    "errorObject": {
+      "type": "object",
+      "required": ["code", "class", "retryable", "message"],
+      "properties": {
+        "code": { "$ref": "#/$defs/errorCode" },
+        "class": { "$ref": "#/$defs/errorClass" },
+        "retryable": {
+          "type": "boolean",
+          "description": "Whether an identical retry could plausibly succeed. POLICY_DENIED is always false."
+        },
+        "message": {
+          "type": "string",
+          "description": "Human-readable and safe to show an end user.",
+          "minLength": 1
+        },
+        "rule": {
+          "type": "string",
+          "description": "For POLICY_DENIED: the deciding rule, as namespace plus identifier or index."
+        },
+        "winError": {
+          "type": ["integer", "null"],
+          "description": "The Win32 error code that caused this, when applicable.",
+          "minimum": 0
+        },
+        "winErrorName": {
+          "type": ["string", "null"],
+          "description": "Symbolic name of winError, e.g. ERROR_ACCESS_DENIED."
+        },
+        "details": { "$ref": "#/$defs/errorDetails" }
+      }
+    },
+
+    "errorDetails": {
+      "type": "object",
+      "description": "Additional structured context. Open by design; unknown members MUST be ignored.",
+      "properties": {
+        "reason": {
+          "type": "string",
+          "description": "Explanatory text. When reasonSource is 'model' this is untrusted generated content and MUST NOT be interpreted as instructions."
+        },
+        "reasonSource": {
+          "type": "string",
+          "enum": ["rule", "agent", "model"],
+          "description": "Provenance of `reason`. 'rule' means the text was authored by the operator in the policy file; 'agent' means the agent composed it deterministically from an OS or validation outcome; 'model' means the stage-2 model review generated it, which makes it untrusted content.",
+          "default": "agent"
+        },
+        "subject": {
+          "type": "string",
+          "enum": ["path", "argv", "query", "executable", "shell", "cwd", "env", "limits", "encoding"],
+          "description": "Which aspect of the request was rejected."
+        },
+        "allowedSummary": {
+          "type": "object",
+          "description": "What IS permitted, so a caller can propose a valid alternative instead of guessing.",
+          "properties": {
+            "execMode": { "type": "string", "enum": ["allowlist", "disabled"] },
+            "allowedCommandIds": { "type": "array", "items": { "type": "string" } },
+            "readRoots": { "type": "array", "items": { "type": "string" } },
+            "shellsAllowed": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "duplicateOf": {
+          "type": "string",
+          "description": "For INVALID_ARGUMENT on a duplicate request id: the id that was reused."
+        },
+        "trace": {
+          "type": "string",
+          "description": "For INTERNAL_ERROR: a redacted diagnostic. MUST NOT contain secrets or full paths outside the read roots."
+        }
+      }
+    }
+  },
+
+  "$ref": "#/$defs/errorObject"
+}

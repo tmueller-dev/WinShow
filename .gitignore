@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Secrets — the agent token must never be committed
+*.token
+agent.token
+*.pem
+*.pfx
+*.key
+!docs/**/*.key.example
+
+# Local configuration and runtime output
+policy.local.toml
+*.local.toml
+logs/
+*.jsonl.gz

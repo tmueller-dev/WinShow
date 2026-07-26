@@ -1,0 +1,76 @@
+// WSAP/1 transcript: policy denials.
+//
+// The agent is the sole enforcement point. The server forwards arguments unchanged and has
+// no ability to relax anything below. Every denial names the deciding rule so the operator
+// can debug their own policy, and carries a summary of what IS allowed so the caller can
+// propose a permitted alternative instead of guessing at variants.
+//
+// The policy in force here is docs/examples/policy.developer.toml.
+//
+// ---------------------------------------------------------------- denial by deny glob
+// S->A  A caller asked to read an SSH private key. The path is inside C:\Users, which is not
+//       a read root, and it also matches the deny glob '**\id_rsa*'. Deny always wins.
+{"w":1,"t":"req","id":"r-11a1","op":"fs.read","ts":"2026-07-26T18:20:01.000Z","p":{"path":"C:\\Users\\alice\\.ssh\\id_rsa","tailLines":5}}
+// A->S  POLICY_DENIED is retryable:false on purpose. It tells the caller to stop trying
+//       variants and to tell the human that the policy needs changing. `subject` says which
+//       aspect was rejected; `reasonSource":"rule"` marks the text as coming from the policy
+//       file rather than from a model.
+{"w":1,"t":"err","id":"r-11a1","op":"fs.read","ts":"2026-07-26T18:20:01.004Z","e":{"code":"POLICY_DENIED","class":"policy","retryable":false,"message":"Path 'C:\\Users\\alice\\.ssh\\id_rsa' is denied by rule 'no-secrets'.","rule":"fs.denyGlobs[no-secrets]","details":{"reason":"Private keys and credential stores are never readable.","reasonSource":"rule","subject":"path","allowedSummary":{"readRoots":["C:\\src","D:\\Logs","C:\\inetpub\\wwwroot","C:\\Program Files\\App\\logs"]}}}}
+
+// ---------------------------------------------------------------- denial outside all roots
+// S->A  A plain path outside every configured read root.
+{"w":1,"t":"req","id":"r-11a2","op":"fs.list","ts":"2026-07-26T18:20:04.000Z","p":{"path":"C:\\Windows\\System32\\config"}}
+// A->S  Note that this is POLICY_DENIED, not ACCESS_DENIED. The distinction matters: this
+//       one is fixed by editing policy.toml, whereas ACCESS_DENIED would mean a Windows ACL
+//       refused the agent's service account and would be fixed with icacls.
+{"w":1,"t":"err","id":"r-11a2","op":"fs.list","ts":"2026-07-26T18:20:04.003Z","e":{"code":"POLICY_DENIED","class":"policy","retryable":false,"message":"Path 'C:\\Windows\\System32\\config' is not within any allowed root.","rule":"fs.readRoots","details":{"reason":"Only configured read roots are accessible.","reasonSource":"rule","subject":"path","allowedSummary":{"readRoots":["C:\\src","D:\\Logs","C:\\inetpub\\wwwroot","C:\\Program Files\\App\\logs"]}}}}
+
+// ---------------------------------------------------------------- the junction escape
+// S->A  C:\src\shortcut is a directory junction pointing at C:\Users. Lexically the path is
+//       inside the read root C:\src, so a naive implementation would allow it.
+{"w":1,"t":"req","id":"r-11a3","op":"fs.list","ts":"2026-07-26T18:20:07.000Z","p":{"path":"C:\\src\\shortcut\\alice\\Documents"}}
+// A->S  The agent resolved the OS-final path before evaluating policy, saw C:\Users\alice\...,
+//       and denied. This is the single most important rule in section 10.1 of the protocol
+//       specification: policy is evaluated on the final path, never the lexical one.
+{"w":1,"t":"err","id":"r-11a3","op":"fs.list","ts":"2026-07-26T18:20:07.009Z","e":{"code":"POLICY_DENIED","class":"policy","retryable":false,"message":"Path resolves outside every allowed root after link resolution.","rule":"fs.readRoots","details":{"reason":"The path traverses a junction that leaves the permitted roots.","reasonSource":"rule","subject":"path","allowedSummary":{"readRoots":["C:\\src","D:\\Logs","C:\\inetpub\\wwwroot","C:\\Program Files\\App\\logs"]}}}}
+
+// ---------------------------------------------------------------- denial by exec deny rule
+// S->A  A destructive command. It would not have matched any allow rule either, but the deny
+//       rules are evaluated last and are what produce the message.
+{"w":1,"t":"req","id":"r-55c1","op":"exec.start","ts":"2026-07-26T18:20:12.000Z","p":{"argv":["C:\\Windows\\System32\\vssadmin.exe","delete","shadows","/all","/quiet"],"cwd":"C:\\src","timeoutMs":30000}}
+// A->S  No process was ever created, so this is an err on exec.start and there is NO
+//       exec.exit event. allowedCommandIds lets the caller offer something legitimate.
+{"w":1,"t":"err","id":"r-55c1","op":"exec.start","ts":"2026-07-26T18:20:12.006Z","e":{"code":"POLICY_DENIED","class":"policy","retryable":false,"message":"Command denied: matches deny rule 'no-destructive'.","rule":"exec.deny[no-destructive]","details":{"reason":"Destructive disk and boot operations are never permitted.","reasonSource":"rule","subject":"argv","allowedSummary":{"execMode":"allowlist","allowedCommandIds":["svc-query","tasklist","dotnet-build","ps-diagnostics"],"shellsAllowed":["powershell"]}}}}
+
+// ---------------------------------------------------------------- stage 2: model review
+// S->A  This command passes stage 1: it matches the allow rule "ps-diagnostics", whose
+//       scriptPatterns permit Get-ChildItem against a quoted path. Stage 1 has no opinion
+//       about intent, only about shape.
+{"w":1,"t":"req","id":"r-77aa","op":"exec.start","ts":"2026-07-26T18:20:20.000Z","p":{"shell":"powershell","commandLine":"Get-ChildItem -Path 'C:\\src' -Recurse","cwd":"C:\\src","timeoutMs":60000}}
+// A->S  Stage 2 is running a small local model and is taking a while. The agent emits this
+//       so the server can report "under review" rather than "slow". It carries NO
+//       authorization meaning and must never be read as an approval. Meanwhile the agent
+//       keeps answering session.ping, or the connection would be torn down as dead.
+{"w":1,"t":"evt","corr":"r-77aa","seq":0,"op":"policy.reviewing","ts":"2026-07-26T18:20:21.600Z","p":{"stage":"modelReview","elapsedMs":1600}}
+// A->S  The local model declined it. Stage 2 can only ever DENY: it never widens what stage
+//       1 permitted, so a compromised or confused model cannot grant access.
+//       reasonSource is "model", which marks the text as untrusted generated content. The
+//       server relays it labelled as such, and nothing downstream may treat it as
+//       instructions.
+{"w":1,"t":"err","id":"r-77aa","op":"exec.start","ts":"2026-07-26T18:20:23.140Z","e":{"code":"POLICY_DENIED","class":"policy","retryable":false,"message":"Denied by stage-2 review.","rule":"policy.modelReview","details":{"reason":"A recursive enumeration of the whole source tree is disproportionate to the stated task and would take several minutes.","reasonSource":"model","subject":"argv","allowedSummary":{"execMode":"allowlist","allowedCommandIds":["svc-query","tasklist","dotnet-build","ps-diagnostics"],"shellsAllowed":["powershell"]}}}}
+
+// ---------------------------------------------------------------- contrast: an OS denial
+// S->A  A path that IS inside a read root, so policy allows it.
+{"w":1,"t":"req","id":"r-88bb","op":"fs.read","ts":"2026-07-26T18:20:30.000Z","p":{"path":"C:\\inetpub\\wwwroot\\restricted\\notes.txt","tailLines":10}}
+// A->S  ...but Windows refused: the agent's service account has no ACL entry for it. This is
+//       ACCESS_DENIED with the Win32 code attached, and it is fixed with icacls, not with
+//       policy.toml. Keeping the two apart is what makes either message actionable.
+{"w":1,"t":"err","id":"r-88bb","op":"fs.read","ts":"2026-07-26T18:20:30.011Z","e":{"code":"ACCESS_DENIED","class":"os","retryable":false,"message":"Windows denied access to 'C:\\inetpub\\wwwroot\\restricted\\notes.txt'.","winError":5,"winErrorName":"ERROR_ACCESS_DENIED","details":{"reason":"The agent runs as NT SERVICE\\WinShowAgent, which has no read ACE on this file.","reasonSource":"agent","subject":"path"}}}
+
+// ---------------------------------------------------------------- contrast: a bad regex
+// S->A  fs.grep with lookahead, which the normative regex subset excludes.
+{"w":1,"t":"req","id":"r-99cc","op":"fs.grep","ts":"2026-07-26T18:20:36.000Z","p":{"root":"C:\\src","query":"(?=.*password).*key","isRegex":true}}
+// A->S  Rejected up front rather than accepted and allowed to backtrack catastrophically.
+//       Excluding lookaround and backreferences makes the pattern expressible by a
+//       linear-time engine, so a hang is structurally impossible rather than merely unlikely.
+{"w":1,"t":"err","id":"r-99cc","op":"fs.grep","ts":"2026-07-26T18:20:36.002Z","e":{"code":"INVALID_ARGUMENT","class":"argument","retryable":false,"message":"Regex construct '(?=' (lookahead) is not supported.","details":{"reason":"The supported subset excludes lookaround and backreferences so that matching is linear time.","reasonSource":"agent","subject":"query"}}}

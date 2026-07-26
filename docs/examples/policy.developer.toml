@@ -1,0 +1,211 @@
+# WinShow agent policy — developer workstation
+#
+# Location: C:\ProgramData\WinShow\policy.toml
+# ACL:      Administrators + SYSTEM = Full
+#           NT SERVICE\WinShowAgent = Read
+#
+# This file is the ONLY place authorization happens. The MCP server forwards tool arguments
+# unchanged and has no ability to relax anything below. There is no protocol field, header,
+# or flag that can override a rule here.
+#
+# Validated by: python3 tools/validate-docs.py
+# Reference:    docs/04-agent-policy.md
+
+schemaVersion    = 1
+policyVersion    = "2026-07-20T09:00:00Z"
+denialDisclosure = "explicit"   # name the deciding rule, so the operator can debug their own policy
+
+# ---------------------------------------------------------------------- connection
+[connection]
+serverUrl = "wss://winshow.example.com/agent"
+agentId   = "WS-PROD-01"
+tokenFile = 'C:\ProgramData\WinShow\agent.token'   # never inline the token; ACL this file
+
+tlsTrust  = "system"
+# tlsTrust = "ca-bundle"
+# caBundle = 'C:\ProgramData\WinShow\corp-ca.pem'
+# tlsTrust = "pin"
+# spkiPins = ["sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+#             "sha256/BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB="]  # two, so rotation does not brick the agent
+
+proxy   = "system"
+noProxy = ["*.corp.local", "10.0.0.0/8"]
+
+heartbeatTimeoutMs = 60000
+reconnectMinMs     = 1000
+reconnectMaxMs     = 60000
+
+# ---------------------------------------------------------------------- limits
+[limits]
+maxFrameBytes          = 1048576
+maxConcurrentRequests  = 16
+maxConcurrentProcesses = 4
+maxExecMillis          = 300000
+maxOutputBytesPerExec  = 4194304
+maxReadBytes           = 1048576
+maxGlobResults         = 5000
+maxGrepMatches         = 500
+maxHashBytes           = 536870912
+ackWindowChunks        = 64
+ackWindowBytes         = 4194304
+maxSendQueueBytes      = 16777216
+sendStallTimeoutMs     = 30000
+
+# ---------------------------------------------------------------------- filesystem
+[fs]
+enabled                   = true
+writeEnabled              = false   # write operations are a later phase; hard off
+followLinks               = false   # do not traverse junctions or symlinks
+allowAlternateDataStreams = false
+defaultAnsiEncoding       = "cp1252"
+auditReads                = true
+
+# Allowed read roots. Containment is component-wise and ordinal case-insensitive, and is
+# evaluated against the OS-FINAL path — after symlink, junction and 8.3 short-name
+# resolution. 'C:\src2' does not match the root 'C:\src'.
+#
+# TOML literal strings (single quotes) need no backslash escaping. That is why this file is
+# TOML and not JSON.
+readRoots = [
+  'C:\src',
+  'D:\Logs',
+  'C:\inetpub\wwwroot',
+  'C:\Program Files\App\logs',
+  '\\fileserver\share\reports',   # UNC form: mapped drive letters do not exist in session 0
+]
+
+# Deny globs beat every allow. Case-insensitive, applied to the final path.
+denyGlobs = [
+  '**\.ssh\**',
+  '**\id_rsa*',
+  '**\*.pfx',
+  '**\*.p12',
+  '**\*.key',
+  '**\*.pem',
+  '**\web.config',            # connection strings
+  '**\appsettings*.json',     # secrets in configuration
+  '**\.git\**',
+  '**\*.kdbx',
+  'C:\Users\**',              # belt and braces: not a root anyway
+]
+
+[[fs.rootOverrides]]
+path              = 'D:\Logs'
+maxReadBytes      = 8388608          # logs may be read in larger slices than the default
+allowedExtensions = [".log", ".txt", ".json", ".etl"]
+
+# ---------------------------------------------------------------------- execution
+[exec]
+enabled          = true
+mode             = "allowlist"       # there is deliberately no "any" mode
+defaultTimeoutMs = 60000
+defaultCwd       = 'C:\src'
+cwdRoots         = ['C:\src', 'D:\Logs']
+shellsAllowed    = ["powershell"]    # shell = "none" is always available; cmd and pwsh are not
+
+allowUnsafeCmdMetacharacters = false
+
+# Bare executable names resolve against THIS list, never the ambient PATH. Resolving against
+# PATH is executable substitution waiting to happen.
+executableSearchPath = [
+  'C:\Windows\System32',
+  'C:\Program Files\dotnet',
+  'C:\Program Files\Git\cmd',
+]
+
+envMode           = "overlay"
+envAllow          = ["DOTNET_*", "NUGET_*", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "CI"]
+envAllowSensitive = false            # PATH, PATHEXT, ComSpec, SystemRoot, windir stay locked
+envRedact         = ["WINSHOW_*", "*TOKEN*", "*SECRET*", "*PASSWORD*", "*_KEY"]
+envBase = [
+  "SystemRoot", "windir", "PATH", "PATHEXT", "TEMP", "TMP",
+  "ComSpec", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE",
+]
+
+gracePeriodMs      = 2000            # CTRL_BREAK, then hard kill of the job object
+detachOnDisconnect = []              # empty: every child dies when the connection drops
+
+# --- allow rules -------------------------------------------------------------
+# The first matching allow permits the request. Any matching deny then overrides it.
+
+[[exec.allow]]
+id         = "svc-query"
+executable = 'C:\Windows\System32\sc.exe'
+argv       = ["query", "{service}"]
+[exec.allow.placeholders]
+service = '^[A-Za-z0-9_.-]{1,64}$'   # anchored; unanchored placeholder patterns fail at load
+
+[[exec.allow]]
+id         = "tasklist"
+executable = 'C:\Windows\System32\tasklist.exe'
+argvPrefix = []                      # any arguments permitted...
+argvDeny   = ["/s", "/S"]            # ...except targeting another machine
+
+[[exec.allow]]
+id           = "dotnet-build"
+executable   = 'C:\Program Files\dotnet\dotnet.exe'
+argvPrefix   = ["build"]             # argv MUST start with this token
+maxTimeoutMs = 900000                # this rule may exceed the global default
+cwdRoots     = ['C:\src']
+
+[[exec.allow]]
+id    = "ps-diagnostics"
+shell = "powershell"
+# For a shell rule the WHOLE script must match one of these anchored patterns. Anchoring is
+# what stops 'Get-Service; Remove-Item -Recurse C:\' from slipping through.
+scriptPatterns = [
+  '^Get-Service(\s+-Name\s+[A-Za-z0-9_.-]{1,64})?$',
+  '^Get-NetTCPConnection\s+-LocalPort\s+\d{1,5}$',
+  '^Get-EventLog\s+-LogName\s+(System|Application)\s+-Newest\s+\d{1,4}$',
+  # A pattern containing single quotes needs TOML's multi-line literal form ('''...'''),
+  # because a single-quoted literal string has no escape for a single quote.
+  '''^Get-ChildItem\s+-Path\s+'[^']+'(\s+-Recurse)?$''',
+]
+
+# --- deny rules --------------------------------------------------------------
+# Evaluated last. Any match denies, whatever the allow rules said.
+
+[[exec.deny]]
+id        = "no-destructive"
+argvRegex = '(?i)\b(format|diskpart|bcdedit|vssadmin|cipher\s+/w|rd\s+/s|del\s+/f)\b'
+reason    = "Destructive disk and boot operations are never permitted."
+
+[[exec.deny]]
+id              = "no-credential-tools"
+executableRegex = '(?i)\\(mimikatz|procdump|ntdsutil|reg)\.exe$'
+reason          = "Credential-access tooling is blocked."
+
+[[exec.deny]]
+id              = "no-network-exec"
+executableRegex = '(?i)^\\\\'
+reason          = "Executables may not be launched from network locations."
+
+# ---------------------------------------------------------------------- stage 2 review
+# Runs only AFTER stage 1 has already allowed a request, and can only ever DENY. It never
+# widens what the deterministic rules permitted, so a confused or compromised model cannot
+# grant access — the worst it can do is refuse work.
+[modelReview]
+enabled         = true
+failMode        = "closed"           # a stalled reviewer denies rather than waves things through
+timeoutMs       = 8000
+endpoint        = "http://127.0.0.1:11434"   # loopback only; never a remote address
+model           = "qwen2.5-coder:1.5b"
+appliesTo       = ["exec.start"]     # reviewing every fs call would make the agent unusable
+maxRequestChars = 8192
+auditVerdicts   = true
+
+# ---------------------------------------------------------------------- processes
+[proc]
+listEnabled        = false           # later phase
+includeCommandLine = false           # command lines routinely contain credentials
+killEnabled        = false
+
+# ---------------------------------------------------------------------- logging
+[logging]
+level          = "info"
+file           = 'C:\ProgramData\WinShow\logs\agent.jsonl'
+auditFile      = 'C:\ProgramData\WinShow\logs\audit.jsonl'   # append-only
+maxFileBytes   = 33554432
+maxFiles       = 10
+eventLog       = true                # mirror the exec audit into the Windows Event Log
+redactPatterns = ['(?i)(password|token|secret|apikey)\s*[=:]\s*\S+']

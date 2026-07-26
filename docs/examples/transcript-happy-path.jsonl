@@ -1,0 +1,68 @@
+// WSAP/1 transcript: the happy path.
+//
+// Preconditions: the agent has completed a TLS handshake to wss://winshow.example.com/agent,
+// presented `Authorization: Bearer <token>` and `Sec-WebSocket-Protocol: winshow.v1`, and the
+// server responded 101 echoing the subprotocol. Everything below is post-upgrade.
+//
+// ---------------------------------------------------------------- handshake
+// A->S  The agent speaks first. It has 10 seconds to do so or the server closes with 4008.
+//       Note that `policy` is a SUMMARY: the server never receives the rules themselves.
+{"w":1,"t":"req","id":"h-1","op":"session.hello","ts":"2026-07-26T18:13:59.004Z","p":{"wireVersions":[1],"agentId":"WS-PROD-01","agent":{"name":"winshow-agent","version":"1.2.0","implementation":"python-3.11"},"os":{"platform":"windows","version":"10.0.19045","build":19045,"ubr":4291,"edition":"Windows 10 Pro","arch":"x64","is64Bit":true,"hostname":"WS-PROD-01","fqdn":"ws-prod-01.corp.local","domain":"CORP","uptimeSeconds":942133},"identity":{"user":"NT SERVICE\\WinShowAgent","sid":"S-1-5-80-3245678901-2233445566-778899001-1122334455-5566778899","isService":true,"sessionId":0,"isElevated":false,"integrityLevel":"medium","privileges":["SeChangeNotifyPrivilege"]},"capabilities":["fs.list","fs.stat","fs.read","fs.glob","fs.grep","exec.start"],"features":["longPaths","unc","policy.modelReview"],"limits":{"maxFrameBytes":1048576,"maxConcurrentRequests":16,"maxConcurrentProcesses":4,"maxOutputBytesPerExec":4194304,"maxExecMillis":300000,"maxReadBytes":1048576,"maxGlobResults":5000,"ackWindowChunks":64,"ackWindowBytes":4194304},"policy":{"policyVersion":"2026-07-20T09:00:00Z","policyHash":"sha256:9f2c1d4b8a3e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8","state":"ok","readRoots":["C:\\src","D:\\Logs","C:\\Program Files\\App\\logs"],"denyGlobCount":9,"execMode":"allowlist","allowedCommandCount":4,"allowedCommandIds":["svc-query","tasklist","dotnet-build","ps-diagnostics"],"shellsAllowed":["powershell"],"writeEnabled":false,"modelReview":{"enabled":true,"failMode":"closed","timeoutMs":8000},"maxOutputBytes":4194304,"maxExecMillis":300000,"denialDisclosure":"explicit"},"clock":{"now":"2026-07-26T18:13:59.004Z","tzOffsetMinutes":120,"tzName":"W. Europe Standard Time"}}}
+// S->A  Version negotiation is intersection-of-lists; the server picks the highest common one.
+//       maxFrameBytes and the ack windows are the minimum of what each side offered.
+//       Only now does the agent slot count as occupied and /readyz on the server go green.
+{"w":1,"t":"res","id":"h-1","op":"session.hello","ts":"2026-07-26T18:13:59.061Z","p":{"wireVersion":1,"sessionId":"s-0f9d2a11","server":{"name":"winshow-server","version":"0.1.0"},"serverTime":"2026-07-26T18:13:59.061Z","heartbeatIntervalMs":20000,"maxFrameBytes":1048576,"ackWindowChunks":64,"ackWindowBytes":4194304,"enabledOps":["fs.list","fs.stat","fs.read","fs.glob","fs.grep","exec.start"]}}
+
+// ---------------------------------------------------------------- heartbeat
+// S->A  Application-level ping, deliberately not a WebSocket control ping: this proves the
+//       agent's event loop is alive, not merely that a middlebox is answering for it.
+{"w":1,"t":"req","id":"p-1","op":"session.ping","ts":"2026-07-26T18:14:19.000Z","p":{"nonce":"a3f9c1"}}
+// A->S  The nonce is echoed verbatim. `load` is advisory telemetry.
+{"w":1,"t":"res","id":"p-1","op":"session.ping","ts":"2026-07-26T18:14:19.008Z","p":{"nonce":"a3f9c1","agentTime":"2026-07-26T18:14:19.008Z","load":{"inflight":0,"processes":0,"cpuPercent":0.4,"memoryMB":38}}}
+
+// ---------------------------------------------------------------- list a directory
+// S->A  The caller asked "what are the newest logs on D:?". Forward slashes are accepted on
+//       input; the response canonicalises to backslashes.
+{"w":1,"t":"req","id":"r-7f3a","op":"fs.list","ts":"2026-07-26T18:14:22.100Z","p":{"path":"D:/Logs","pattern":"*.log","limit":3,"sort":"mtime","descending":true}}
+// A->S  total is 47 but only 3 were returned, so truncated is true with the reason. A caller
+//       that wants more pages by offset can rely on the sort being a total order.
+{"w":1,"t":"res","id":"r-7f3a","op":"fs.list","ts":"2026-07-26T18:14:22.140Z","p":{"path":"D:\\Logs","total":47,"truncated":true,"truncationReason":"limit","entries":[{"name":"service.log","path":"D:\\Logs\\service.log","kind":"file","size":18446311,"mtime":"2026-07-26T18:12:44.117Z","ctime":"2026-05-02T07:31:02.000Z","atime":"2026-07-26T18:12:44.117Z","attrs":["archive"],"linkTarget":null},{"name":"service-2026-07-25.log","path":"D:\\Logs\\service-2026-07-25.log","kind":"file","size":22011904,"mtime":"2026-07-26T00:00:03.550Z","ctime":"2026-07-25T00:00:01.000Z","atime":"2026-07-26T00:00:03.550Z","attrs":["archive"],"linkTarget":null},{"name":"archive","path":"D:\\Logs\\archive","kind":"dir","size":0,"mtime":"2026-07-20T03:00:00.000Z","ctime":"2025-11-11T12:00:00.000Z","atime":"2026-07-26T18:00:00.000Z","attrs":[],"linkTarget":null}]}}
+
+// ---------------------------------------------------------------- tail a log
+// S->A  Tail mode. The file is 17 GiB; the agent MUST read backwards from EOF in blocks
+//       rather than scanning from the start.
+{"w":1,"t":"req","id":"r-2c81","op":"fs.read","ts":"2026-07-26T18:14:25.000Z","p":{"path":"C:\\Program Files\\App\\logs\\service.log","tailLines":2,"encoding":"auto"}}
+// A->S  encoding reports what was actually used — never "auto". decodeErrors is 0, so the
+//       sniff is trustworthy. Line terminators are included in `data` and are NOT translated.
+{"w":1,"t":"res","id":"r-2c81","op":"fs.read","ts":"2026-07-26T18:14:25.031Z","p":{"path":"C:\\Program Files\\App\\logs\\service.log","data":"2026-07-26 20:12:41 ERROR Unhandled exception\r\n   at App.Worker.Run()\r\n","encoding":"utf-8","hadBom":false,"byteOffset":18446234,"byteLength":77,"fileSize":18446311,"eof":true,"firstLine":204881,"lineCount":2,"totalLines":null,"truncated":false,"lineEnding":"crlf","decodeErrors":0,"chunked":false}}
+
+// ---------------------------------------------------------------- run a command
+// S->A  argv, not a shell string: the policy engine can only enforce an allowlist on tokens
+//       it can see. This matches the allow rule with id "dotnet-build".
+{"w":1,"t":"req","id":"r-91b2","op":"exec.start","ts":"2026-07-26T18:14:30.000Z","p":{"argv":["C:\\Program Files\\dotnet\\dotnet.exe","build","-c","Release"],"cwd":"C:\\src\\proj","timeoutMs":300000,"maxOutputBytes":4194304,"outputEncoding":"utf-8","envMode":"overlay","env":{"DOTNET_CLI_TELEMETRY_OPTOUT":"1"}}}
+// A->S  The response comes back as soon as the process exists, not when it finishes.
+//       commandLineUsed is the ground truth of what ran, after quoting — it is what belongs
+//       in the audit log, because reconstructing it later from argv only guesses.
+{"w":1,"t":"res","id":"r-91b2","op":"exec.start","ts":"2026-07-26T18:14:30.688Z","p":{"pid":8812,"startedAt":"2026-07-26T18:14:30.688Z","resolvedExecutable":"C:\\Program Files\\dotnet\\dotnet.exe","resolvedCwd":"C:\\src\\proj","commandLineUsed":"\"C:\\Program Files\\dotnet\\dotnet.exe\" build -c Release"}}
+// A->S  Output events. seq is zero-based and gapless for this correlation.
+{"w":1,"t":"evt","corr":"r-91b2","seq":0,"op":"exec.output","ts":"2026-07-26T18:14:31.940Z","p":{"stream":"stdout","data":"Determining projects to restore...\r\n","encoding":"utf-8","bytes":36,"totalBytes":36,"dropped":false}}
+// S->A  The server acknowledges as it consumes, advancing the credit window. ackSeq and
+//       ackBytes are cumulative, so a lost ack is harmless: the next one supersedes it.
+{"w":1,"t":"evt","corr":"r-91b2","seq":0,"op":"exec.ack","ts":"2026-07-26T18:14:31.945Z","p":{"ackSeq":0,"ackBytes":36}}
+{"w":1,"t":"evt","corr":"r-91b2","seq":1,"op":"exec.output","ts":"2026-07-26T18:14:33.104Z","p":{"stream":"stdout","data":"  Restored C:\\src\\proj\\proj.csproj (in 1.21 sec).\r\n","encoding":"utf-8","bytes":51,"totalBytes":87,"dropped":false}}
+// A->S  stderr is a separate stream, read concurrently with stdout. Reading one to
+//       completion before the other deadlocks any program that fills the 64 KiB pipe buffer.
+{"w":1,"t":"evt","corr":"r-91b2","seq":2,"op":"exec.output","ts":"2026-07-26T18:14:35.702Z","p":{"stream":"stderr","data":"CSC : warning CS1591: Missing XML comment\r\n","encoding":"utf-8","bytes":43,"totalBytes":43,"dropped":false}}
+{"w":1,"t":"evt","corr":"r-91b2","seq":3,"op":"exec.output","ts":"2026-07-26T18:14:38.010Z","p":{"stream":"stdout","data":"Build succeeded.\r\n","encoding":"utf-8","bytes":18,"totalBytes":105,"dropped":false}}
+{"w":1,"t":"evt","corr":"r-91b2","seq":1,"op":"exec.ack","ts":"2026-07-26T18:14:38.015Z","p":{"ackSeq":3,"ackBytes":148}}
+// A->S  exec.exit is always the last event for its correlation, and is sent exactly once.
+//       exitReason is authoritative; exitCode alone would not distinguish "the build failed"
+//       from "we killed it". Both unsigned and signed readings are given because Windows
+//       status codes such as 0xC0000005 appear in documentation in both forms.
+{"w":1,"t":"evt","corr":"r-91b2","seq":4,"op":"exec.exit","ts":"2026-07-26T18:14:38.220Z","p":{"exitCode":0,"exitCodeSigned":0,"exitReason":"exited","startedAt":"2026-07-26T18:14:30.688Z","endedAt":"2026-07-26T18:14:38.201Z","durationMs":7513,"stdoutBytes":105,"stderrBytes":43,"truncated":false,"truncationReason":null,"cpuTimeMs":6110,"peakWorkingSetBytes":412315648,"killedProcesses":0}}
+
+// ---------------------------------------------------------------- graceful shutdown
+// A->S  The Windows service is stopping. session.bye is best effort; the server must cope
+//       with its absence, because a connection can also just vanish.
+{"w":1,"t":"evt","corr":"s-0f9d2a11","seq":0,"op":"session.bye","ts":"2026-07-26T19:02:11.000Z","p":{"reason":"shutdown","message":"Service stop requested by SCM.","bySessionId":null}}
+// The agent then closes with code 1001 and terminates every process it started.

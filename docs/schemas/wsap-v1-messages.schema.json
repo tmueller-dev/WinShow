@@ -1,0 +1,606 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://winshow.example/schemas/wsap-v1-messages.schema.json",
+  "title": "WSAP/1 message catalogue",
+  "description": "Validates a complete WSAP/1 frame: envelope structure plus the payload schema for its operation. Deliberately does not set additionalProperties:false anywhere, because WSAP/1 requires receivers to ignore unknown fields (docs/03-agent-protocol.md section 11.1).",
+
+  "$defs": {
+    "encoding": {
+      "type": "string",
+      "enum": ["utf-8", "utf-16le", "utf-16be", "utf-32le", "cp1252", "cp850", "oem", "ansi", "binary", "auto"]
+    },
+    "encodingUsed": {
+      "description": "Encoding actually used. Never 'auto' — a response reports what happened, not what was asked for.",
+      "type": "string",
+      "enum": ["utf-8", "utf-16le", "utf-16be", "utf-32le", "cp1252", "cp850", "oem", "ansi", "binary"]
+    },
+    "lineEnding": {
+      "type": "string",
+      "enum": ["crlf", "lf", "cr", "mixed", "none"]
+    },
+    "windowsPath": {
+      "type": "string",
+      "minLength": 2,
+      "description": "Absolute Windows path. Canonical form in responses: backslashes, uppercase drive letter, no \\\\?\\ prefix."
+    },
+    "timestamp": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?Z$"
+    },
+
+    "fileEntry": {
+      "type": "object",
+      "required": ["name", "path", "kind", "size", "mtime", "ctime", "atime", "attrs"],
+      "properties": {
+        "name": { "type": "string" },
+        "path": { "$ref": "#/$defs/windowsPath" },
+        "kind": { "type": "string", "enum": ["file", "dir", "symlink", "junction", "other"] },
+        "size": { "type": "integer", "minimum": 0 },
+        "mtime": { "$ref": "#/$defs/timestamp" },
+        "ctime": { "$ref": "#/$defs/timestamp", "description": "Windows CREATION time, not the POSIX status-change time." },
+        "atime": { "$ref": "#/$defs/timestamp" },
+        "attrs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["readonly", "hidden", "system", "archive", "temporary", "compressed", "encrypted", "reparse", "offline", "notContentIndexed"]
+          }
+        },
+        "linkTarget": { "type": ["string", "null"] }
+      }
+    },
+
+    "limits": {
+      "type": "object",
+      "required": [
+        "maxFrameBytes", "maxConcurrentRequests", "maxConcurrentProcesses",
+        "maxOutputBytesPerExec", "maxExecMillis", "maxReadBytes", "maxGlobResults",
+        "ackWindowChunks", "ackWindowBytes"
+      ],
+      "properties": {
+        "maxFrameBytes": { "type": "integer", "minimum": 65536, "maximum": 8388608 },
+        "maxConcurrentRequests": { "type": "integer", "minimum": 1 },
+        "maxConcurrentProcesses": { "type": "integer", "minimum": 0 },
+        "maxOutputBytesPerExec": { "type": "integer", "minimum": 1024 },
+        "maxExecMillis": { "type": "integer", "minimum": 1000 },
+        "maxReadBytes": { "type": "integer", "minimum": 1024 },
+        "maxGlobResults": { "type": "integer", "minimum": 1 },
+        "ackWindowChunks": { "type": "integer", "minimum": 1 },
+        "ackWindowBytes": { "type": "integer", "minimum": 65536 }
+      }
+    },
+
+    "policySummary": {
+      "description": "A SUMMARY only. The agent MUST NOT send the full policy: the server is untrusted and rule internals help an attacker.",
+      "type": "object",
+      "required": ["policyVersion", "policyHash", "state", "readRoots", "execMode", "writeEnabled", "denialDisclosure"],
+      "properties": {
+        "policyVersion": { "type": "string" },
+        "policyHash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "state": { "type": "string", "enum": ["ok", "invalid"] },
+        "readRoots": { "type": "array", "items": { "$ref": "#/$defs/windowsPath" } },
+        "denyGlobCount": { "type": "integer", "minimum": 0 },
+        "denyGlobs": { "type": "array", "items": { "type": "string" } },
+        "execMode": { "type": "string", "enum": ["allowlist", "disabled"] },
+        "allowedCommandCount": { "type": "integer", "minimum": 0 },
+        "allowedCommandIds": { "type": "array", "items": { "type": "string" } },
+        "shellsAllowed": { "type": "array", "items": { "type": "string", "enum": ["none", "cmd", "powershell", "pwsh"] } },
+        "writeEnabled": { "type": "boolean" },
+        "modelReview": {
+          "type": "object",
+          "required": ["enabled"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "failMode": { "type": "string", "enum": ["closed", "open"] },
+            "timeoutMs": { "type": "integer", "minimum": 100 },
+            "model": { "type": "string" }
+          }
+        },
+        "maxOutputBytes": { "type": "integer", "minimum": 0 },
+        "maxExecMillis": { "type": "integer", "minimum": 0 },
+        "denialDisclosure": { "type": "string", "enum": ["explicit", "notfound"] }
+      }
+    },
+
+    "truncationReason": {
+      "type": ["string", "null"],
+      "enum": ["limit", "agent_cap", "time_budget", "maxResults", "timeBudget", "maxDepth", "maxOutputBytes", "backpressure", null]
+    },
+
+    "session.hello.req": {
+      "type": "object",
+      "required": ["wireVersions", "agentId", "agent", "os", "identity", "capabilities", "limits", "policy", "clock"],
+      "properties": {
+        "wireVersions": { "type": "array", "minItems": 1, "items": { "type": "integer", "minimum": 1 } },
+        "agentId": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9._-]+$" },
+        "agent": {
+          "type": "object",
+          "required": ["name", "version", "implementation"],
+          "properties": {
+            "name": { "type": "string" },
+            "version": { "type": "string" },
+            "implementation": { "type": "string" },
+            "buildId": { "type": "string" }
+          }
+        },
+        "os": {
+          "type": "object",
+          "required": ["platform", "version", "build", "arch", "is64Bit", "hostname", "uptimeSeconds"],
+          "properties": {
+            "platform": { "const": "windows" },
+            "version": { "type": "string" },
+            "build": { "type": "integer" },
+            "ubr": { "type": "integer" },
+            "edition": { "type": "string" },
+            "arch": { "type": "string", "enum": ["x86", "x64", "arm64"] },
+            "is64Bit": { "type": "boolean" },
+            "hostname": { "type": "string" },
+            "fqdn": { "type": ["string", "null"] },
+            "domain": { "type": ["string", "null"] },
+            "uptimeSeconds": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "identity": {
+          "type": "object",
+          "required": ["user", "sid", "isService", "sessionId", "isElevated", "integrityLevel", "privileges"],
+          "properties": {
+            "user": { "type": "string" },
+            "sid": { "type": "string", "pattern": "^S-1-" },
+            "isService": { "type": "boolean" },
+            "sessionId": { "type": "integer", "minimum": 0 },
+            "isElevated": { "type": "boolean" },
+            "integrityLevel": { "type": "string", "enum": ["untrusted", "low", "medium", "high", "system"] },
+            "privileges": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "capabilities": { "type": "array", "items": { "type": "string" } },
+        "features": { "type": "array", "items": { "type": "string" } },
+        "limits": { "$ref": "#/$defs/limits" },
+        "policy": { "$ref": "#/$defs/policySummary" },
+        "clock": {
+          "type": "object",
+          "required": ["now", "tzOffsetMinutes"],
+          "properties": {
+            "now": { "$ref": "#/$defs/timestamp" },
+            "tzOffsetMinutes": { "type": "integer", "minimum": -900, "maximum": 900 },
+            "tzName": { "type": "string" }
+          }
+        },
+        "resumeOf": { "type": ["string", "null"] }
+      }
+    },
+
+    "session.hello.res": {
+      "type": "object",
+      "required": ["wireVersion", "sessionId", "server", "serverTime", "heartbeatIntervalMs", "maxFrameBytes", "ackWindowChunks", "ackWindowBytes", "enabledOps"],
+      "properties": {
+        "wireVersion": { "const": 1 },
+        "sessionId": { "type": "string", "minLength": 1 },
+        "server": {
+          "type": "object",
+          "required": ["name", "version"],
+          "properties": { "name": { "type": "string" }, "version": { "type": "string" } }
+        },
+        "serverTime": { "$ref": "#/$defs/timestamp" },
+        "heartbeatIntervalMs": { "type": "integer", "minimum": 1000 },
+        "maxFrameBytes": { "type": "integer", "minimum": 65536, "maximum": 8388608 },
+        "ackWindowChunks": { "type": "integer", "minimum": 1 },
+        "ackWindowBytes": { "type": "integer", "minimum": 65536 },
+        "enabledOps": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+
+    "session.ping.req": {
+      "type": "object",
+      "required": ["nonce"],
+      "properties": { "nonce": { "type": "string", "minLength": 1, "maxLength": 64 } }
+    },
+
+    "session.ping.res": {
+      "type": "object",
+      "required": ["nonce"],
+      "properties": {
+        "nonce": { "type": "string" },
+        "agentTime": { "$ref": "#/$defs/timestamp" },
+        "load": {
+          "type": "object",
+          "properties": {
+            "inflight": { "type": "integer", "minimum": 0 },
+            "processes": { "type": "integer", "minimum": 0 },
+            "cpuPercent": { "type": "number", "minimum": 0 },
+            "memoryMB": { "type": "number", "minimum": 0 }
+          }
+        }
+      }
+    },
+
+    "session.cancel.req": {
+      "type": "object",
+      "required": ["targetId", "reason"],
+      "properties": {
+        "targetId": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "reason": { "type": "string", "enum": ["client_cancelled", "timeout", "server_shutdown", "buffer_limit"] }
+      }
+    },
+
+    "session.cancel.res": {
+      "type": "object",
+      "required": ["targetId", "cancelled"],
+      "properties": {
+        "targetId": { "type": "string" },
+        "cancelled": { "type": "boolean" }
+      }
+    },
+
+    "session.bye.evt": {
+      "type": "object",
+      "required": ["reason"],
+      "properties": {
+        "reason": { "type": "string", "enum": ["shutdown", "superseded", "policy_reload_failed", "fatal"] },
+        "message": { "type": "string" },
+        "bySessionId": { "type": ["string", "null"] }
+      }
+    },
+
+    "fs.list.req": {
+      "type": "object",
+      "required": ["path"],
+      "properties": {
+        "path": { "$ref": "#/$defs/windowsPath" },
+        "offset": { "type": "integer", "minimum": 0 },
+        "limit": { "type": "integer", "minimum": 1 },
+        "pattern": { "type": "string" },
+        "kinds": { "type": "array", "items": { "type": "string", "enum": ["file", "dir", "symlink", "junction", "other"] } },
+        "includeHidden": { "type": "boolean" },
+        "sort": { "type": "string", "enum": ["name", "size", "mtime"] },
+        "descending": { "type": "boolean" },
+        "followLinks": { "type": "boolean" }
+      }
+    },
+
+    "fs.list.res": {
+      "type": "object",
+      "required": ["path", "entries", "total", "truncated"],
+      "properties": {
+        "path": { "$ref": "#/$defs/windowsPath" },
+        "entries": { "type": "array", "items": { "$ref": "#/$defs/fileEntry" } },
+        "total": { "type": "integer", "minimum": 0 },
+        "truncated": { "type": "boolean" },
+        "truncationReason": { "$ref": "#/$defs/truncationReason" }
+      }
+    },
+
+    "fs.stat.req": {
+      "type": "object",
+      "required": ["path"],
+      "properties": {
+        "path": { "$ref": "#/$defs/windowsPath" },
+        "resolveLinks": { "type": "boolean" },
+        "sniff": { "type": "boolean" },
+        "hash": { "type": "string", "enum": ["none", "sha256"] }
+      }
+    },
+
+    "fs.stat.res": {
+      "type": "object",
+      "required": ["path", "exists"],
+      "properties": {
+        "path": { "$ref": "#/$defs/windowsPath" },
+        "exists": { "type": "boolean" },
+        "entry": { "oneOf": [{ "$ref": "#/$defs/fileEntry" }, { "type": "null" }] },
+        "realPath": { "type": ["string", "null"] },
+        "sniff": {
+          "type": ["object", "null"],
+          "properties": {
+            "isProbablyText": { "type": "boolean" },
+            "encoding": { "$ref": "#/$defs/encodingUsed" },
+            "hasBom": { "type": "boolean" },
+            "lineEnding": { "$ref": "#/$defs/lineEnding" },
+            "sampledBytes": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "sha256": { "type": ["string", "null"], "pattern": "^([0-9a-f]{64})?$" },
+        "volume": {
+          "type": ["object", "null"],
+          "properties": {
+            "driveType": { "type": "string", "enum": ["fixed", "network", "removable", "ram", "cdrom", "unknown"] },
+            "fileSystem": { "type": "string" },
+            "freeBytes": { "type": "integer", "minimum": 0 },
+            "totalBytes": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    },
+
+    "fs.read.req": {
+      "type": "object",
+      "required": ["path"],
+      "description": "Exactly one addressing mode: byte range (offset/length), line range (fromLine/lineCount), or tail (tailLines). Supplying more than one is INVALID_ARGUMENT.",
+      "properties": {
+        "path": { "$ref": "#/$defs/windowsPath" },
+        "offset": { "type": "integer", "minimum": 0 },
+        "length": { "type": "integer", "minimum": 0 },
+        "fromLine": { "type": "integer", "minimum": 1 },
+        "lineCount": { "type": "integer", "minimum": 1 },
+        "tailLines": { "type": "integer", "minimum": 1 },
+        "encoding": { "$ref": "#/$defs/encoding" },
+        "stripBom": { "type": "boolean" },
+        "force": { "type": "boolean" },
+        "maxBytes": { "type": "integer", "minimum": 1 }
+      },
+      "allOf": [
+        { "not": { "required": ["fromLine", "tailLines"] } },
+        { "not": { "required": ["length", "tailLines"] } },
+        { "not": { "required": ["length", "fromLine"] } }
+      ]
+    },
+
+    "fs.read.res": {
+      "type": "object",
+      "required": ["path", "encoding", "hadBom", "byteOffset", "byteLength", "fileSize", "eof", "truncated", "lineEnding", "decodeErrors", "chunked"],
+      "properties": {
+        "path": { "$ref": "#/$defs/windowsPath" },
+        "data": { "type": "string" },
+        "encoding": { "$ref": "#/$defs/encodingUsed" },
+        "hadBom": { "type": "boolean" },
+        "byteOffset": { "type": "integer", "minimum": 0 },
+        "byteLength": { "type": "integer", "minimum": 0 },
+        "fileSize": { "type": "integer", "minimum": 0 },
+        "eof": { "type": "boolean" },
+        "firstLine": { "type": ["integer", "null"], "minimum": 1 },
+        "lineCount": { "type": ["integer", "null"], "minimum": 0 },
+        "totalLines": { "type": ["integer", "null"], "minimum": 0 },
+        "truncated": { "type": "boolean" },
+        "lineEnding": { "$ref": "#/$defs/lineEnding" },
+        "decodeErrors": { "type": "integer", "minimum": 0 },
+        "chunked": { "type": "boolean" }
+      }
+    },
+
+    "fs.read.chunk.evt": {
+      "type": "object",
+      "required": ["seq", "data", "encoding"],
+      "properties": {
+        "seq": { "type": "integer", "minimum": 0 },
+        "data": { "type": "string" },
+        "encoding": { "$ref": "#/$defs/encodingUsed" }
+      }
+    },
+
+    "fs.glob.req": {
+      "type": "object",
+      "required": ["root", "patterns"],
+      "properties": {
+        "root": { "$ref": "#/$defs/windowsPath" },
+        "patterns": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+        "excludes": { "type": "array", "items": { "type": "string" } },
+        "maxDepth": { "type": "integer", "minimum": 0 },
+        "maxResults": { "type": "integer", "minimum": 1 },
+        "timeBudgetMs": { "type": "integer", "minimum": 100 },
+        "kinds": { "type": "array", "items": { "type": "string", "enum": ["file", "dir", "symlink", "junction", "other"] } },
+        "includeHidden": { "type": "boolean" },
+        "followLinks": { "type": "boolean" },
+        "stat": { "type": "boolean" }
+      }
+    },
+
+    "fs.glob.res": {
+      "type": "object",
+      "required": ["root", "matches", "count", "truncated", "scannedDirs", "elapsedMs"],
+      "properties": {
+        "root": { "$ref": "#/$defs/windowsPath" },
+        "matches": {
+          "type": "array",
+          "items": { "oneOf": [{ "type": "string" }, { "$ref": "#/$defs/fileEntry" }] }
+        },
+        "count": { "type": "integer", "minimum": 0 },
+        "truncated": { "type": "boolean" },
+        "truncationReason": { "$ref": "#/$defs/truncationReason" },
+        "scannedDirs": { "type": "integer", "minimum": 0 },
+        "elapsedMs": { "type": "integer", "minimum": 0 }
+      }
+    },
+
+    "fs.grep.req": {
+      "type": "object",
+      "required": ["root", "query"],
+      "properties": {
+        "root": { "$ref": "#/$defs/windowsPath" },
+        "query": { "type": "string", "minLength": 1 },
+        "isRegex": { "type": "boolean" },
+        "caseSensitive": { "type": "boolean" },
+        "patterns": { "type": "array", "items": { "type": "string" } },
+        "excludes": { "type": "array", "items": { "type": "string" } },
+        "contextBefore": { "type": "integer", "minimum": 0, "maximum": 20 },
+        "contextAfter": { "type": "integer", "minimum": 0, "maximum": 20 },
+        "maxMatches": { "type": "integer", "minimum": 1 },
+        "maxMatchesPerFile": { "type": "integer", "minimum": 1 },
+        "maxFileBytes": { "type": "integer", "minimum": 1 },
+        "skipBinary": { "type": "boolean" },
+        "timeBudgetMs": { "type": "integer", "minimum": 100 },
+        "encoding": { "$ref": "#/$defs/encoding" }
+      }
+    },
+
+    "fs.grep.res": {
+      "type": "object",
+      "required": ["matches", "count", "filesScanned", "filesSkipped", "truncated", "elapsedMs"],
+      "properties": {
+        "matches": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path", "line", "column", "text"],
+            "properties": {
+              "path": { "$ref": "#/$defs/windowsPath" },
+              "line": { "type": "integer", "minimum": 1 },
+              "column": { "type": "integer", "minimum": 1 },
+              "text": { "type": "string" },
+              "before": { "type": "array", "items": { "type": "string" } },
+              "after": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        },
+        "count": { "type": "integer", "minimum": 0 },
+        "filesScanned": { "type": "integer", "minimum": 0 },
+        "filesSkipped": { "type": "integer", "minimum": 0 },
+        "truncated": { "type": "boolean" },
+        "truncationReason": { "$ref": "#/$defs/truncationReason" },
+        "elapsedMs": { "type": "integer", "minimum": 0 }
+      }
+    },
+
+    "exec.start.req": {
+      "type": "object",
+      "description": "Exactly one of argv and commandLine. commandLine is valid only when shell is not 'none'.",
+      "properties": {
+        "argv": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+        "commandLine": { "type": "string", "minLength": 1 },
+        "shell": { "type": "string", "enum": ["none", "cmd", "powershell", "pwsh"] },
+        "cwd": { "$ref": "#/$defs/windowsPath" },
+        "env": { "type": "object", "additionalProperties": { "type": ["string", "null"] } },
+        "envMode": { "type": "string", "enum": ["overlay", "clean"] },
+        "timeoutMs": { "type": "integer", "minimum": 1 },
+        "maxOutputBytes": { "type": "integer", "minimum": 1 },
+        "outputEncoding": { "$ref": "#/$defs/encoding" },
+        "mergeStderr": { "type": "boolean" },
+        "stdin": { "type": ["string", "null"] },
+        "stdinEncoding": { "$ref": "#/$defs/encoding" },
+        "priority": { "type": "string", "enum": ["idle", "belowNormal", "normal"] }
+      },
+      "oneOf": [
+        { "required": ["argv"], "not": { "required": ["commandLine"] } },
+        { "required": ["commandLine"], "not": { "required": ["argv"] } }
+      ]
+    },
+
+    "exec.start.res": {
+      "type": "object",
+      "required": ["pid", "startedAt", "resolvedExecutable", "resolvedCwd", "commandLineUsed"],
+      "properties": {
+        "pid": { "type": "integer", "minimum": 1 },
+        "startedAt": { "$ref": "#/$defs/timestamp" },
+        "resolvedExecutable": { "$ref": "#/$defs/windowsPath" },
+        "resolvedCwd": { "$ref": "#/$defs/windowsPath" },
+        "commandLineUsed": { "type": "string" }
+      }
+    },
+
+    "exec.output.evt": {
+      "type": "object",
+      "required": ["stream", "data", "encoding", "bytes", "totalBytes", "dropped"],
+      "properties": {
+        "stream": { "type": "string", "enum": ["stdout", "stderr"] },
+        "data": { "type": "string" },
+        "encoding": { "$ref": "#/$defs/encodingUsed" },
+        "bytes": { "type": "integer", "minimum": 0 },
+        "totalBytes": { "type": "integer", "minimum": 0 },
+        "dropped": { "type": "boolean" }
+      }
+    },
+
+    "exec.ack.evt": {
+      "type": "object",
+      "required": ["ackSeq", "ackBytes"],
+      "properties": {
+        "ackSeq": { "type": "integer", "minimum": -1, "description": "Highest contiguous agent-side seq consumed. Cumulative." },
+        "ackBytes": { "type": "integer", "minimum": 0, "description": "Cumulative bytes consumed." }
+      }
+    },
+
+    "exec.exit.evt": {
+      "type": "object",
+      "required": ["exitCode", "exitReason", "startedAt", "endedAt", "durationMs", "stdoutBytes", "stderrBytes", "truncated"],
+      "properties": {
+        "exitCode": { "type": ["integer", "null"], "minimum": 0, "maximum": 4294967295 },
+        "exitCodeSigned": { "type": ["integer", "null"], "minimum": -2147483648, "maximum": 2147483647 },
+        "exitReason": {
+          "type": "string",
+          "enum": ["exited", "timeout", "cancelled", "killed", "backpressure", "agentShutdown"]
+        },
+        "startedAt": { "$ref": "#/$defs/timestamp" },
+        "endedAt": { "$ref": "#/$defs/timestamp" },
+        "durationMs": { "type": "integer", "minimum": 0 },
+        "stdoutBytes": { "type": "integer", "minimum": 0 },
+        "stderrBytes": { "type": "integer", "minimum": 0 },
+        "truncated": { "type": "boolean" },
+        "truncationReason": { "$ref": "#/$defs/truncationReason" },
+        "cpuTimeMs": { "type": ["integer", "null"], "minimum": 0 },
+        "peakWorkingSetBytes": { "type": ["integer", "null"], "minimum": 0 },
+        "killedProcesses": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    },
+
+    "policy.reviewing.evt": {
+      "type": "object",
+      "required": ["stage", "elapsedMs"],
+      "properties": {
+        "stage": { "const": "modelReview" },
+        "elapsedMs": { "type": "integer", "minimum": 0 }
+      }
+    }
+  },
+
+  "allOf": [
+    { "$ref": "https://winshow.example/schemas/wsap-v1-envelope.schema.json" },
+
+    { "if": { "properties": { "t": { "const": "req" }, "op": { "const": "session.hello" } }, "required": ["t", "op"] },
+      "then": { "properties": { "p": { "$ref": "#/$defs/session.hello.req" } } } },
+    { "if": { "properties": { "t": { "const": "res" }, "op": { "const": "session.hello" } }, "required": ["t", "op"] },
+      "then": { "properties": { "p": { "$ref": "#/$defs/session.hello.res" } } } },
+
+    { "if": { "properties": { "t": { "const": "req" }, "op": { "const": "session.ping" } }, "required": ["t", "op"] },
+      "then": { "properties": { "p": { "$ref": "#/$defs/session.ping.req" } } } },
+    { "if": { "properties": { "t": { "const": "res" }, "op": { "const": "session.ping" } }, "required": ["t", "op"] },
+      "then": { "properties": { "p": { "$ref": "#/$defs/session.ping.res" } } } },
+
+    { "if": { "properties": { "t": { "const": "req" }, "op": { "const": "session.cancel" } }, "required": ["t", "op"] },
+      "then": { "properties": { "p": { "$ref": "#/$defs/session.cancel.req" } } } },
+    { "if": { "properties": { "t": { "const": "res" }, "op": { "const": "session.cancel" } }, "required": ["t", "op"] },
+      "then": { "properties": { "p": { "$ref": "#/$defs/session.cancel.res" } } } },
+
+    { "if": { "properties": { "t": { "const": "evt" }, "op": { "const": "session.bye" } }, "required": ["t", "op"] },
+      "then": { "properties": { "p": { "$ref": "#/$defs/session.bye.evt" } } } },
+
+    { "if": { "properties": { "t": { "const": "req" }, "op": { "const": "fs.list" } }, "required": ["t", "op"] },
+      "then": { "properties": { "p": { "$ref": "#/$defs/fs.list.req" } } } },
+    { "if": { "properties": { "t": { "const": "res" }, "op": { "const": "fs.list" } }, "required": ["t", "op"] },
+      "then": { "properties": { "p": { "$ref": "#/$defs/fs.list.res" } } } },
+
+    { "if": { "properties": { "t": { "const": "req" }, "op": { "const": "fs.stat" } }, "required": ["t", "op"] },
+      "then": { "properties": { "p": { "$ref": "#/$defs/fs.stat.req" } } } },
+    { "if": { "properties": { "t": { "const": "res" }, "op": { "const": "fs.stat" } }, "required": ["t", "op"] },
+      "then": { "properties": { "p": { "$ref": "#/$defs/fs.stat.res" } } } },
+
+    { "if": { "properties": { "t": { "const": "req" }, "op": { "const": "fs.read" } }, "required": ["t", "op"] },
+      "then": { "properties": { "p": { "$ref": "#/$defs/fs.read.req" } } } },
+    { "if": { "properties": { "t": { "const": "res" }, "op": { "const": "fs.read" } }, "required": ["t", "op"] },
+      "then": { "properties": { "p": { "$ref": "#/$defs/fs.read.res" } } } },
+    { "if": { "properties": { "t": { "const": "evt" }, "op": { "const": "fs.read.chunk" } }, "required": ["t", "op"] },
+      "then": { "properties": { "p": { "$ref": "#/$defs/fs.read.chunk.evt" } } } },
+
+    { "if": { "properties": { "t": { "const": "req" }, "op": { "const": "fs.glob" } }, "required": ["t", "op"] },
+      "then": { "properties": { "p": { "$ref": "#/$defs/fs.glob.req" } } } },
+    { "if": { "properties": { "t": { "const": "res" }, "op": { "const": "fs.glob" } }, "required": ["t", "op"] },
+      "then": { "properties": { "p": { "$ref": "#/$defs/fs.glob.res" } } } },
+
+    { "if": { "properties": { "t": { "const": "req" }, "op": { "const": "fs.grep" } }, "required": ["t", "op"] },
+      "then": { "properties": { "p": { "$ref": "#/$defs/fs.grep.req" } } } },
+    { "if": { "properties": { "t": { "const": "res" }, "op": { "const": "fs.grep" } }, "required": ["t", "op"] },
+      "then": { "properties": { "p": { "$ref": "#/$defs/fs.grep.res" } } } },
+
+    { "if": { "properties": { "t": { "const": "req" }, "op": { "const": "exec.start" } }, "required": ["t", "op"] },
+      "then": { "properties": { "p": { "$ref": "#/$defs/exec.start.req" } } } },
+    { "if": { "properties": { "t": { "const": "res" }, "op": { "const": "exec.start" } }, "required": ["t", "op"] },
+      "then": { "properties": { "p": { "$ref": "#/$defs/exec.start.res" } } } },
+    { "if": { "properties": { "t": { "const": "evt" }, "op": { "const": "exec.output" } }, "required": ["t", "op"] },
+      "then": { "properties": { "p": { "$ref": "#/$defs/exec.output.evt" } } } },
+    { "if": { "properties": { "t": { "const": "evt" }, "op": { "const": "exec.ack" } }, "required": ["t", "op"] },
+      "then": { "properties": { "p": { "$ref": "#/$defs/exec.ack.evt" } } } },
+    { "if": { "properties": { "t": { "const": "evt" }, "op": { "const": "exec.exit" } }, "required": ["t", "op"] },
+      "then": { "properties": { "p": { "$ref": "#/$defs/exec.exit.evt" } } } },
+
+    { "if": { "properties": { "t": { "const": "evt" }, "op": { "const": "policy.reviewing" } }, "required": ["t", "op"] },
+      "then": { "properties": { "p": { "$ref": "#/$defs/policy.reviewing.evt" } } } }
+  ]
+}

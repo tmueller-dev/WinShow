@@ -1,0 +1,40 @@
+# WinShow agent policy — minimal
+#
+# The safe starting point: one read root, no execution at all. Begin here, confirm the
+# connection works end to end, then widen deliberately one root and one command at a time.
+#
+# Everything omitted from this file takes the default documented in
+# docs/schemas/policy-v1.schema.json, and every default is the restrictive one.
+
+schemaVersion    = 1
+policyVersion    = "minimal-2026-07-26"
+denialDisclosure = "explicit"
+
+[connection]
+serverUrl = "wss://winshow.example.com/agent"
+agentId   = "WS-LAB-01"
+tokenFile = 'C:\ProgramData\WinShow\agent.token'
+
+[fs]
+enabled   = true
+readRoots = ['C:\src']
+
+# Even a minimal policy carries deny globs. Read roots are what an operator remembers to set;
+# deny globs are what catches the secret that ended up inside one of them.
+denyGlobs = [
+  '**\.ssh\**',
+  '**\id_rsa*',
+  '**\*.pem',
+  '**\*.pfx',
+  '**\.git\**',
+]
+
+[exec]
+enabled = false
+mode    = "disabled"
+
+[logging]
+level     = "info"
+file      = 'C:\ProgramData\WinShow\logs\agent.jsonl'
+auditFile = 'C:\ProgramData\WinShow\logs\audit.jsonl'
+eventLog  = true
