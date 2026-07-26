@@ -140,7 +140,10 @@ class TestExecution:
         bridge, agent, _ = linked
         agent.serve_exec(chunks=[("stdout", "a"), ("stdout", "b"), ("stdout", "c")])
         await bridge.call(Op.EXEC_START, {"argv": ["x"]})
-        assert len(agent.acks) == 3
+        # The acks are sent before exec.exit resolves the call, but the harness consumes
+        # frames on its own task, so waiting is the difference between asserting on
+        # behaviour and asserting on scheduler luck.
+        assert await agent.wait_for(lambda: len(agent.acks) == 3), f"saw {agent.acks}"
         assert [a["ackSeq"] for a in agent.acks] == [0, 1, 2]
         # Cumulative, not per-chunk.
         assert [a["ackBytes"] for a in agent.acks] == [1, 2, 3]
