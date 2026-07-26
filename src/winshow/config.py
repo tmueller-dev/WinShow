@@ -16,7 +16,7 @@ from typing import Annotated, Any, Literal
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-__all__ = ["Settings", "get_settings"]
+__all__ = ["Settings", "get_settings", "set_settings"]
 
 #: §1.7. The default frame cap, and the hard ceiling a deployment may raise it to.
 DEFAULT_MAX_FRAME_BYTES = 1_048_576
@@ -51,7 +51,7 @@ class Settings(BaseSettings):
 
     # -- listeners ---------------------------------------------------------------
 
-    host: str = "0.0.0.0"  # noqa: S104 — a container binds all interfaces by design
+    host: str = "0.0.0.0"
     port: int = 8080
 
     #: `/metrics` binds separately and defaults to loopback: the metric set names the
@@ -143,7 +143,8 @@ class Settings(BaseSettings):
         short = [f"#{i + 1}" for i, tok in enumerate(tokens) if len(tok) < MIN_TOKEN_LENGTH]
         if short:
             raise ValueError(
-                f"agent token(s) {', '.join(short)} are shorter than {MIN_TOKEN_LENGTH} characters. "
+                f"agent token(s) {', '.join(short)} are shorter than "
+                f"{MIN_TOKEN_LENGTH} characters. "
                 "Generate one with: python3 -c 'import secrets; print(secrets.token_urlsafe(32))'"
             )
         return tokens
@@ -210,3 +211,13 @@ def get_settings(**overrides: Any) -> Settings:
     if _settings is None:
         _settings = Settings()
     return _settings
+
+
+def set_settings(settings: Settings) -> None:
+    """Install `settings` as the process-wide instance.
+
+    Used by the command line when a flag overrides a value, so that every later
+    `get_settings()` sees the same object rather than re-reading the environment.
+    """
+    global _settings
+    _settings = settings

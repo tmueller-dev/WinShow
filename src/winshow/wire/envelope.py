@@ -26,14 +26,14 @@ from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 from winshow.errors import WinShowError, WireError, WireErrorCode
 
 __all__ = [
-    "WIRE_VERSION",
-    "MessageType",
-    "Envelope",
     "ID_PATTERN",
+    "WIRE_VERSION",
+    "Envelope",
+    "FrameTooLarge",
+    "MessageType",
     "decode_frame",
     "encode_frame",
     "now_rfc3339",
-    "FrameTooLarge",
 ]
 
 WIRE_VERSION: Final[int] = 1
@@ -128,9 +128,8 @@ class Envelope(BaseModel):
         # Per-type structural requirements from the §2.2 presence column. These are
         # checked here rather than as separate models because the four message types
         # share one envelope on the wire and a receiver must decide the type first.
-        if self.t in (MessageType.REQ, MessageType.RES, MessageType.ERR):
-            if self.id is None:
-                raise ValueError(f"{self.t} message requires an 'id'")
+        if self.t in (MessageType.REQ, MessageType.RES, MessageType.ERR) and self.id is None:
+            raise ValueError(f"{self.t} message requires an 'id'")
         if self.t is MessageType.EVT:
             if self.corr is None:
                 raise ValueError("evt message requires a 'corr'")

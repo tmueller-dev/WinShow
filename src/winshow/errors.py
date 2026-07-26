@@ -23,16 +23,16 @@ from typing import Any, Final
 from pydantic import BaseModel, ConfigDict, Field
 
 __all__ = [
-    "ErrorClass",
-    "WireErrorCode",
-    "ServerErrorCode",
-    "WireError",
-    "WinShowError",
-    "AgentUnavailable",
     "AgentDisconnected",
+    "AgentProtocolError",
     "AgentSuperseded",
     "AgentTimeout",
-    "AgentProtocolError",
+    "AgentUnavailable",
+    "ErrorClass",
+    "ServerErrorCode",
+    "WinShowError",
+    "WireError",
+    "WireErrorCode",
     "classify",
     "is_retryable",
 ]

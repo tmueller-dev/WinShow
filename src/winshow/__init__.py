@@ -10,7 +10,7 @@ normative wire contract.
 
 from __future__ import annotations
 
-__all__ = ["__version__", "SERVER_NAME"]
+__all__ = ["SERVER_NAME", "__version__"]
 
 __version__ = "0.1.0"
 SERVER_NAME = "winshow-server"

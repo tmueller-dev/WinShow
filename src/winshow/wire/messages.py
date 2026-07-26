@@ -19,39 +19,39 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 __all__ = [
-    "Op",
-    "Encoding",
-    "ExitReason",
-    "CancelReason",
-    "ByeReason",
-    "FileEntry",
     "AgentLimits",
-    "PolicySummary",
-    "HelloRequest",
-    "HelloResponse",
-    "PingRequest",
-    "PingResponse",
+    "ByeEvent",
+    "ByeReason",
+    "CancelReason",
     "CancelRequest",
     "CancelResponse",
-    "ByeEvent",
-    "FsListRequest",
-    "FsListResponse",
-    "FsStatRequest",
-    "FsStatResponse",
-    "FsReadRequest",
-    "FsReadResponse",
-    "FsReadChunkEvent",
+    "Encoding",
+    "ExecAckEvent",
+    "ExecExitEvent",
+    "ExecOutputEvent",
+    "ExecStartRequest",
+    "ExecStartResponse",
+    "ExitReason",
+    "FileEntry",
     "FsGlobRequest",
     "FsGlobResponse",
     "FsGrepRequest",
     "FsGrepResponse",
+    "FsListRequest",
+    "FsListResponse",
+    "FsReadChunkEvent",
+    "FsReadRequest",
+    "FsReadResponse",
+    "FsStatRequest",
+    "FsStatResponse",
     "GrepMatch",
-    "ExecStartRequest",
-    "ExecStartResponse",
-    "ExecOutputEvent",
-    "ExecAckEvent",
-    "ExecExitEvent",
+    "HelloRequest",
+    "HelloResponse",
+    "Op",
+    "PingRequest",
+    "PingResponse",
     "PolicyReviewingEvent",
+    "PolicySummary",
 ]
 
 
@@ -463,9 +463,12 @@ class ExecAckEvent(_Wire):
     Cumulative by design: it carries the highest contiguous `seq` and the running byte
     total, so a lost acknowledgement is superseded by the next one and MUST NOT cause
     the agent to fail anything.
+
+    The correlation travels on the envelope's `corr`, not in this payload; `ackSeq` and
+    `ackBytes` are the only members the schema requires. ``ackSeq`` starts at -1, meaning
+    nothing has been consumed yet.
     """
 
-    corr: str
     ack_seq: int = Field(alias="ackSeq")
     ack_bytes: int = Field(alias="ackBytes")
 
