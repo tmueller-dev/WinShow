@@ -1,0 +1,88 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "winshow"
+version = "0.1.0"
+description = "An MCP server brokering policy-gated file inspection and command execution on a Windows host that dials out"
+readme = "README.md"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+authors = [{ name = "WinShow contributors" }]
+keywords = ["mcp", "model-context-protocol", "windows", "remote", "websocket"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: System Administrators",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: System :: Systems Administration",
+]
+
+dependencies = [
+  "mcp>=1.28,<2",
+  "starlette>=0.47",
+  "uvicorn[standard]>=0.35",
+  "pydantic>=2.9,<3",
+  "pydantic-settings>=2.5",
+  "prometheus-client>=0.21",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8",
+  "pytest-asyncio>=0.24",
+  "httpx>=0.28",
+  "websockets>=13",
+  "jsonschema>=4.23",
+  "ruff>=0.7",
+  "mypy>=1.13",
+]
+
+[project.scripts]
+winshow = "winshow.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/tmueller-dev/WinShow"
+Documentation = "https://github.com/tmueller-dev/WinShow/tree/main/docs"
+Source = "https://github.com/tmueller-dev/WinShow"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/winshow"]
+
+# ---------------------------------------------------------------------------
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM", "RUF", "ASYNC"]
+ignore = [
+  "B008",   # function call in argument default — deliberate for Pydantic Field()
+  "RUF012", # mutable class attrs without ClassVar — Pydantic models
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+packages = ["winshow"]
+mypy_path = "src"
+strict = true
+warn_unreachable = true
+# The MCP SDK and prometheus_client ship partial annotations.
+[[tool.mypy.overrides]]
+module = ["mcp.*", "prometheus_client.*"]
+follow_imports = "skip"
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-ra --strict-markers"
+filterwarnings = ["error"]

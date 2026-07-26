@@ -110,4 +110,13 @@ python3 tools/validate-docs.py
 
 ## Licence
 
-[MIT](LICENSE).
+[GNU Affero General Public License v3.0 or later](LICENSE) (`AGPL-3.0-or-later`).
+
+The Affero clause is the operative one for software of this shape: WinShow is normally reached
+over a network rather than distributed as a binary, and §13 extends the obligation to offer
+corresponding source to users who interact with it remotely. If you run a modified WinShow
+server that others can reach, you owe those users the source of your modifications.
+
+Third-party dependencies keep their own licences, which are permissive and impose their own
+attribution obligations. They are listed with those obligations in
+[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).
