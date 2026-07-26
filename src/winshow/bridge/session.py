@@ -13,7 +13,7 @@ import asyncio
 import contextlib
 import secrets
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, MutableMapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -65,7 +65,7 @@ class WebSocketLike(Protocol):
 
     async def send_text(self, data: str) -> None: ...
 
-    async def receive(self) -> dict[str, Any]: ...
+    async def receive(self) -> MutableMapping[str, Any]: ...
 
     async def close(self, code: int = 1000, reason: str = "") -> None: ...
 

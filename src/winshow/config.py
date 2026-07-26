@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import secrets
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Any, Literal
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -71,12 +71,12 @@ class Settings(BaseSettings):
     #: The valid bearer tokens. §1.4 requires **two** to be simultaneously valid so a
     #: token can be rotated without downtime; more than two is allowed but means a
     #: rotation was left unfinished.
-    agent_tokens: Annotated[list[str], Field(default_factory=list)]
+    agent_tokens: list[str] = Field(default_factory=list)
 
     #: When non-empty, the `X-WinShow-Agent-Id` header must appear in this list. Q-5
     #: leans towards pinning from the start: it costs nothing and it is the multi-host
     #: extension point.
-    allowed_agent_ids: Annotated[list[str], Field(default_factory=list)]
+    allowed_agent_ids: list[str] = Field(default_factory=list)
 
     #: §3.1 / NFR-8. The server pings on this cadence and declares the peer dead after
     #: `agent_dead_after_ms` of silence.
@@ -115,10 +115,10 @@ class Settings(BaseSettings):
     #: §6 of the security document: the server MUST validate `Origin` on `/mcp` and
     #: return 403 on a mismatch. An empty list disables the check, which is only
     #: appropriate behind an authenticating proxy that does it instead.
-    allowed_origins: Annotated[list[str], Field(default_factory=list)]
+    allowed_origins: list[str] = Field(default_factory=list)
 
     #: DNS-rebinding protection in the MCP SDK's transport layer. Empty means any Host.
-    allowed_hosts: Annotated[list[str], Field(default_factory=list)]
+    allowed_hosts: list[str] = Field(default_factory=list)
 
     # -- observability -----------------------------------------------------------
 

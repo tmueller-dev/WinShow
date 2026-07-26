@@ -40,26 +40,57 @@ log = get_logger(__name__)
 
 
 def _transport_security(settings: Settings) -> TransportSecuritySettings:
-    """DNS-rebinding and origin protection for `/mcp`.
+    """DNS-rebinding protection for `/mcp`.
 
-    Enabled only when the operator has named the values to allow. An empty list disables
-    the check, which is the correct configuration behind an authenticating reverse proxy
-    that performs it instead — and the wrong one if nothing else is doing it.
+    Keyed on `allowed_hosts` alone, deliberately. The SDK's middleware rejects **every**
+    Host when protection is on and the host list is empty — there is no allow-all — so
+    enabling it merely because origins were configured would take `/mcp` off the air with
+    a 421 that looks nothing like a configuration mistake.
+
+    The Origin check is therefore performed separately, by `_OriginGuard` below, which is
+    also what `docs/07-operations.md` §1.2 asks for: a **403** on mismatch.
     """
-    enabled = bool(settings.allowed_origins or settings.allowed_hosts)
-    if not enabled:
-        log.warning(
-            "mcp.origin_check_disabled",
-            extra={
-                "event": "mcp.origin_check_disabled",
-                "hint": "Set WINSHOW_ALLOWED_ORIGINS unless a proxy validates Origin for you.",
-            },
-        )
+    enabled = bool(settings.allowed_hosts)
     return TransportSecuritySettings(
         enable_dns_rebinding_protection=enabled,
         allowed_hosts=list(settings.allowed_hosts),
         allowed_origins=list(settings.allowed_origins),
     )
+
+
+class _OriginGuard:
+    """Rejects an `/mcp` request whose `Origin` is not on the configured list.
+
+    `docs/06-security.md` §6: the header exists to stop a *browser* being used as a
+    confused deputy against a server the user's machine can reach. A request with no
+    `Origin` at all is accepted, because non-browser MCP clients do not send one and
+    refusing them would break every legitimate caller to defend against none.
+
+    An empty allow-list disables the check. That is correct behind an authenticating
+    reverse proxy doing it instead, and wrong if nothing is — hence the warning at
+    startup.
+    """
+
+    def __init__(self, app: Any, settings: Settings) -> None:
+        self._app = app
+        self._settings = settings
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http":
+            origin = None
+            for name, value in scope.get("headers", []):
+                if name == b"origin":
+                    origin = value.decode("latin-1")
+                    break
+            if not self._settings.origin_is_allowed(origin):
+                log.warning(
+                    "mcp.origin_rejected",
+                    extra={"event": "mcp.origin_rejected", "origin": origin},
+                )
+                response = PlainTextResponse("Origin not allowed.", status_code=403)
+                await response(scope, receive, send)
+                return
+        await self._app(scope, receive, send)
 
 
 def create_app(settings: Settings | None = None) -> Starlette:
@@ -83,6 +114,16 @@ def create_app(settings: Settings | None = None) -> Starlette:
 
     async def handle_mcp(scope: Scope, receive: Receive, send: Send) -> None:
         await session_manager.handle_request(scope, receive, send)
+
+    guarded_mcp = _OriginGuard(handle_mcp, settings)
+    if not settings.allowed_origins:
+        log.warning(
+            "mcp.origin_check_disabled",
+            extra={
+                "event": "mcp.origin_check_disabled",
+                "hint": "Set WINSHOW_ALLOWED_ORIGINS unless a proxy validates Origin for you.",
+            },
+        )
 
     @contextlib.asynccontextmanager
     async def lifespan(_app: Starlette) -> AsyncIterator[None]:
@@ -111,7 +152,7 @@ def create_app(settings: Settings | None = None) -> Starlette:
 
     application = Starlette(
         routes=[
-            Mount(settings.mcp_path, app=handle_mcp),
+            Mount(settings.mcp_path, app=guarded_mcp),
             WebSocketRoute(settings.agent_path, endpoint=make_agent_endpoint(bridge, settings)),
             Route("/healthz", healthz, methods=["GET"]),
             Route("/readyz", readyz, methods=["GET"]),

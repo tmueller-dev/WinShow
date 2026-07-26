@@ -35,6 +35,9 @@ dev = [
   "pytest>=8",
   "pytest-asyncio>=0.24",
   "httpx>=0.28",
+  # Starlette 1.x's TestClient wants httpx2; without it, importing the test client
+  # raises a deprecation warning that pytest's filterwarnings=error turns fatal.
+  "httpx2>=2.9",
   "websockets>=13",
   "jsonschema>=4.23",
   "ruff>=0.7",
@@ -76,7 +79,9 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["E501"]
+# ASYNC109: the test harness deliberately takes explicit timeouts, because a hung
+# assertion should fail the suite rather than hang CI.
+"tests/*" = ["E501", "ASYNC109"]
 
 [tool.mypy]
 python_version = "3.11"
@@ -90,8 +95,22 @@ module = ["mcp.*", "prometheus_client.*"]
 follow_imports = "skip"
 ignore_missing_imports = true
 
+# Because the SDK's imports are skipped above, its decorators arrive untyped, and
+# strict mode then treats every function they wrap as untyped. The alternative is
+# following the SDK's own annotations, which are partial and would produce more noise
+# than signal.
+[[tool.mypy.overrides]]
+module = ["winshow.mcp.tools"]
+disallow_untyped_decorators = false
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 addopts = "-ra --strict-markers"
-filterwarnings = ["error"]
+filterwarnings = [
+  "error",
+  # The MCP SDK's anyio memory streams raise from __del__ during garbage collection.
+  # It is a teardown artefact of the SDK, not of anything under test here, and
+  # filterwarnings=error would otherwise fail a passing test on a GC timing accident.
+  "ignore::pytest.PytestUnraisableExceptionWarning",
+]

@@ -12,6 +12,8 @@ way round.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
+
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
@@ -20,8 +22,10 @@ from winshow.bridge.bridge import AgentBridge
 
 __all__ = ["make_health_routes"]
 
+Endpoint = Callable[[Request], Awaitable[JSONResponse]]
 
-def make_health_routes(bridge: AgentBridge) -> tuple[object, object]:
+
+def make_health_routes(bridge: AgentBridge) -> tuple[Endpoint, Endpoint]:
     """Return the `/healthz` and `/readyz` handlers bound to `bridge`."""
 
     async def healthz(request: Request) -> JSONResponse:
