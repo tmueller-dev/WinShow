@@ -1,9 +1,13 @@
 """Per-request state held by the server while an operation is in flight.
 
-The server keeps deliberately little: an identifier, the operation, a deadline, the MCP
-progress token when the client supplied one, an output buffer with its byte count, and a
-future to resolve (``docs/02-architecture.md`` §6). Everything else lives on the agent,
-which is the side that owns the process and the filesystem.
+The server keeps deliberately little: an identifier, the operation, a deadline, an output
+buffer with its byte count, and a future to resolve (``docs/02-architecture.md`` §6).
+Everything else lives on the agent, which is the side that owns the process and the
+filesystem.
+
+The progress token that section also mentions is deliberately **not** held here. It
+belongs to the tool layer's progress pump, which is the only thing that uses it; a second
+copy on this record would be state that can disagree with itself.
 """
 
 from __future__ import annotations
@@ -14,7 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from winshow.errors import AgentProtocolError, WinShowError
-from winshow.wire.messages import ExecExitEvent, ExecStartResponse, Op
+from winshow.wire.messages import ExecExitEvent, ExecStartResponse
 
 __all__ = ["OMISSION_MARKER", "InflightRequest", "TruncatingBuffer"]
 
@@ -110,10 +114,6 @@ class InflightRequest:
     deadline: float
     started: float = field(default_factory=time.monotonic)
 
-    #: MCP progress token, when the client supplied one. Absent means the client does not
-    #: want progress notifications, and nothing may depend on them either way (A-4).
-    progress_token: str | int | None = None
-
     #: Next event `seq` expected from the agent. Events for one correlation must arrive
     #: gapless starting at 0 (§8.2).
     expected_seq: int = 0
@@ -132,9 +132,6 @@ class InflightRequest:
     acked_bytes: int = 0
     #: Chunks of a `fs.read` too large for one frame, reassembled in seq order (§4.3).
     read_chunks: list[str] = field(default_factory=list)
-    #: Set when the agent reported a slow stage-2 policy review (§5.5).
-    under_review: bool = False
-    cancelling: bool = False
     #: Set once the server-side buffer overflowed and a `buffer_limit` cancellation was
     #: dispatched, so the cancel is sent once rather than on every subsequent chunk.
     buffer_limit_hit: bool = False
@@ -161,9 +158,6 @@ class InflightRequest:
             )
         self.expected_seq = seq + 1
 
-    def is_exec(self) -> bool:
-        return self.op == Op.EXEC_START
-
     def resolve(self, payload: dict[str, Any]) -> None:
         if not self.future.done():
             self.future.set_result(payload)
@@ -171,7 +165,3 @@ class InflightRequest:
     def fail(self, error: WinShowError) -> None:
         if not self.future.done():
             self.future.set_exception(error)
-
-    @property
-    def elapsed_seconds(self) -> float:
-        return time.monotonic() - self.started

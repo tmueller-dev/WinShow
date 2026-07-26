@@ -191,7 +191,6 @@ class AgentBridge:
         timeout_ms: int | None = None,
         on_output: OutputCallback | None = None,
         on_review: ReviewCallback | None = None,
-        progress_token: str | int | None = None,
         trace: str | None = None,
     ) -> dict[str, Any]:
         """Run one operation against the connected agent, recording the outcome.
@@ -214,7 +213,6 @@ class AgentBridge:
                         timeout_ms=timeout_ms,
                         on_output=on_output,
                         on_review=on_review,
-                        progress_token=progress_token,
                         trace=trace,
                     )
                 except WinShowError as exc:

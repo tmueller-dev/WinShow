@@ -111,7 +111,6 @@ class AgentSession:
         self.connected_since = time.time()
         self.last_message_at = time.monotonic()
         self.rtt_seconds: float | None = None
-        self.closed = asyncio.Event()
         self.close_error: WinShowError | None = None
 
         self._inflight: dict[str, InflightRequest] = {}
@@ -183,7 +182,6 @@ class AgentSession:
         timeout_ms: int | None = None,
         on_output: OutputCallback | None = None,
         on_review: ReviewCallback | None = None,
-        progress_token: str | int | None = None,
         trace: str | None = None,
     ) -> dict[str, Any]:
         """Send a request and await its terminal message.
@@ -213,7 +211,6 @@ class AgentSession:
             op=op,
             future=loop.create_future(),
             deadline=time.monotonic() + deadline_ms / 1000,
-            progress_token=progress_token,
         )
         if op == Op.EXEC_START:
             cap = self.settings.max_buffered_output_bytes
@@ -284,9 +281,6 @@ class AgentSession:
         Idempotent and racy by nature: cancelling an unknown or already-terminal
         identifier returns false and is not an error.
         """
-        entry = self._inflight.get(target_id)
-        if entry is not None:
-            entry.cancelling = True
         request_id = self._new_request_id()
         loop = asyncio.get_running_loop()
         pending = InflightRequest(
@@ -329,7 +323,6 @@ class AgentSession:
                     details={"sessionId": self.session_id, "agentId": self.agent_id},
                 )
             )
-            self.closed.set()
 
     async def _receive_loop(self) -> None:
         while True:
@@ -496,7 +489,6 @@ class AgentSession:
             # §5.5: this carries no authorization meaning and MUST NOT be treated as an
             # approval. Its only purpose is to let the server tell the caller the request
             # is under review rather than merely slow.
-            entry.under_review = True
             review = self._review_callbacks.get(entry.id)
             if review is not None:
                 elapsed = int(payload.get("elapsedMs", 0) or 0)

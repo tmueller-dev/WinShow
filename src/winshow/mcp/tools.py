@@ -579,7 +579,6 @@ async def _run_command(
             timeout_ms=args.timeout_ms,
             on_output=pump.feed if pump else None,
             on_review=pump.note_review if pump else None,
-            progress_token=context.meta.progressToken if pump and context.meta else None,
             trace=_traceparent(context),
         )
     except WinShowError as exc:
