@@ -7,10 +7,17 @@ a build server in an office, a VM at a customer site, anything behind NAT or a c
 firewall. The Windows host needs no inbound firewall rule, no port forward, and no VPN,
 because **it dials out** rather than being dialled.
 
-> **Status: design phase.** This repository contains no implementation. It contains the
-> requirements, the architecture, a normative wire protocol precise enough to implement an
-> agent from in any language, the policy specification, JSON Schemas, and annotated wire
-> transcripts that double as conformance test vectors. See
+> **Status: the server is implemented; the Windows agent is not.** This repository
+> contains a working MCP server — the seven tools, the WSAP/1 bridge, the `/agent`
+> endpoint — together with the design documents it was built from: the requirements, the
+> architecture, a normative wire protocol precise enough to implement an agent from in any
+> language, the policy specification, JSON Schemas, and annotated wire transcripts that
+> double as conformance test vectors.
+>
+> **The Windows agent is still specified rather than built.** Until one exists, the server
+> answers `AGENT_UNAVAILABLE` to everything and `/readyz` stays red. The contract to build
+> one against is [`docs/03-agent-protocol.md`](docs/03-agent-protocol.md), and the
+> checklist to hold it to is [`docs/08-conformance.md`](docs/08-conformance.md). See
 > [`docs/09-roadmap.md`](docs/09-roadmap.md) for what comes next.
 
 ---
@@ -67,6 +74,7 @@ impersonate another user, or see a desktop. See
 | [MCP tool surface](docs/05-mcp-tool-surface.md) | What the assistant sees |
 | [Security](docs/06-security.md) | Threat model, trust boundaries, what this does *not* protect against |
 | [Operations](docs/07-operations.md) | Deploying, installing the agent, troubleshooting |
+| [Deployment](docs/DEPLOYMENT.md) | Running the server as a container, and its configuration |
 | [Conformance](docs/08-conformance.md) | A tickable checklist for agent implementers |
 | [Roadmap](docs/09-roadmap.md) | Phases and their exit criteria |
 | [Decision records](docs/adr/) | Why each significant choice was made |
@@ -94,16 +102,41 @@ prompt-injected reviewer can do is refuse work. See
 
 ---
 
-## Verifying the documents
-
-There is no code to run yet, so what gets checked is the contract itself: every schema is
-valid, every message in every transcript validates against it, event sequence numbers are
-gapless, every example policy validates, every operation and error code named in the prose
-exists in the schemas, and every internal link resolves.
+## Running it
 
 ```sh
-pip install jsonschema
-python3 tools/validate-docs.py
+docker run -d -p 8080:8080 \
+  -e WINSHOW_AGENT_TOKENS="$(docker run --rm ghcr.io/tmueller-dev/winshow --generate-token)" \
+  ghcr.io/tmueller-dev/winshow:latest
+```
+
+`/healthz` goes green immediately; `/readyz` stays red until a Windows agent dials in,
+which is the distinction the whole health split rests on. Configuration, TLS and the
+licence obligations that attach to redistributing the image are in
+[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
+
+---
+
+## Verifying it
+
+Two things get checked, and they are independent.
+
+**The contract.** Every schema is valid, every message in every transcript validates
+against it, event sequence numbers are gapless, every example policy validates, every
+operation and error code named in the prose exists in the schemas, and every internal link
+resolves.
+
+**The implementation.** The test suite drives an in-process agent that speaks WSAP/1
+rather than a mock, so the codec, the correlation table, the sequence checking and the
+acknowledgement pump are all exercised for real. The documented transcripts are replayed
+in both directions: every message the specification documents must parse, and every frame
+the server emits must validate against the published schemas.
+
+```sh
+pip install -e ".[dev]"
+python3 tools/validate-docs.py   # the contract
+python3 -m pytest -q             # the implementation
+python3 -m mypy && python3 -m ruff check src tests
 ```
 
 ---

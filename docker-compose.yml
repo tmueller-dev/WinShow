@@ -1,0 +1,87 @@
+# A runnable WinShow deployment. Operational reasoning behind these choices is in
+# docs/07-operations.md; a walkthrough is in docs/DEPLOYMENT.md.
+#
+#   1. Generate a token:  docker run --rm ghcr.io/tmueller-dev/winshow:latest --generate-token
+#   2. Put it in .env as WINSHOW_AGENT_TOKENS=<token>
+#   3. docker compose up -d
+#
+# TLS is not terminated here. Put a reverse proxy in front (docs/07-operations.md §2.2),
+# and note the two settings that are proxy defaults and wrong for this workload: the
+# WebSocket upgrade headers on /agent, and a read timeout far above the 20-second
+# heartbeat.
+
+services:
+  winshow:
+    image: ghcr.io/tmueller-dev/winshow:latest
+    # Uncomment to build from this checkout instead of pulling.
+    # build: .
+    restart: always
+    environment:
+      # -- the agent link -------------------------------------------------------
+      # Comma-separated. Two are valid at once so a token can be rotated with no
+      # downtime (docs/07-operations.md §4). Never inline the value here; keep it in
+      # .env, which is git-ignored.
+      WINSHOW_AGENT_TOKENS: ${WINSHOW_AGENT_TOKENS:?set WINSHOW_AGENT_TOKENS in .env}
+      # Pin the agent identifier once you know it. Costs nothing and is the extension
+      # point for multiple hosts later.
+      WINSHOW_ALLOWED_AGENT_IDS: ${WINSHOW_ALLOWED_AGENT_IDS:-}
+
+      # -- the MCP side ---------------------------------------------------------
+      # The server returns 403 for any other Origin. Leave empty ONLY if the proxy in
+      # front validates it instead; empty with nothing else checking is an open door
+      # for a browser to be used as a confused deputy (docs/06-security.md §6).
+      WINSHOW_ALLOWED_ORIGINS: ${WINSHOW_ALLOWED_ORIGINS:-}
+
+      # -- behaviour ------------------------------------------------------------
+      # 0 fails fast when no agent is connected. 3000 lets a call arriving during a
+      # short reconnect wait rather than fail.
+      WINSHOW_WAIT_FOR_AGENT_MS: "3000"
+      WINSHOW_LOG_LEVEL: "INFO"
+      WINSHOW_LOG_FORMAT: "json"
+
+      # -- metrics --------------------------------------------------------------
+      # The default bind is 127.0.0.1, which inside a container means "nothing else can
+      # reach it". Binding 0.0.0.0 here is safe only because the port below is published
+      # to loopback on the host, never to the world: the metric set names the agent, the
+      # host and the denial counts.
+      WINSHOW_ADMIN_HOST: "0.0.0.0"
+      WINSHOW_ADMIN_PORT: "9090"
+
+      # Uncomment to keep the audit trail on the volume rather than in stdout.
+      # WINSHOW_AUDIT_FILE: "/var/lib/winshow/audit.jsonl"
+
+    ports:
+      # Public listener: /mcp and /agent. They share a port deliberately — 443 is the one
+      # port that reliably survives corporate egress filtering.
+      - "8080:8080"
+      # Admin listener, loopback only.
+      - "127.0.0.1:9090:9090"
+
+    volumes:
+      - winshow-data:/var/lib/winshow
+
+    # Defence in depth beneath the non-root user the image already runs as.
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+    healthcheck:
+      # Liveness. Deliberately not /readyz, which goes red whenever the Windows host is
+      # away — restarting this container because a remote machine rebooted would be
+      # exactly wrong (docs/07-operations.md §1.1).
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import urllib.request, sys
+          sys.exit(0 if urllib.request.urlopen("http://127.0.0.1:8080/healthz", timeout=2).status == 200 else 1)
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  winshow-data:
