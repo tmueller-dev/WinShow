@@ -98,8 +98,12 @@ an HMAC challenge-response.
 
 Requirements:
 
-- The token **MUST** be at least 32 bytes of CSPRNG output, presented as a printable ASCII
-  string (Base64url of 32 random bytes is RECOMMENDED).
+- **Whoever generates the token MUST** derive it from at least 32 bytes of CSPRNG output,
+  presented as a printable ASCII string (Base64url of 32 random bytes is RECOMMENDED). This
+  is an obligation on the tooling and the operator, not something a peer can verify from the
+  wire — entropy is not observable in a string. The **server SHOULD** refuse to start with a
+  configured token shorter than 32 characters, and both sides **SHOULD** log a warning, since
+  a short token is the one failure of this rule that is detectable.
 - The token **MUST** be transported only in the `Authorization` header. It **MUST NOT**
   appear in a query string, where it would land in proxy and server access logs.
 - The server **MUST** compare it in constant time.
@@ -155,9 +159,14 @@ Corporate Windows hosts frequently reach the internet only through a proxy. The 
 - Fragmented frames **MUST** be supported on receive.
 - The maximum frame size is negotiated during the handshake (§3.1). Default 1 MiB, hard
   ceiling 8 MiB.
-- A frame exceeding the negotiated maximum **MUST** cause the receiver to reply
-  `err FRAME_TOO_LARGE` if the frame was parseable enough to correlate, and then close with
-  code `1009`.
+- A frame exceeding the negotiated maximum **MUST** cause the receiver to close the connection
+  with code `1009`. The receiver **SHOULD** first send `err FRAME_TOO_LARGE` carrying the
+  offending `id`, but only when it actually has one.
+
+  The reason that is a SHOULD rather than a MUST is practical: most WebSocket stacks abort an
+  oversized message at the frame layer and never deliver any application bytes, so the
+  correlation identifier is simply not available. An implementation that cannot name the
+  request is still conforming; the `1009` close is the part a peer can rely on.
 
 ### 1.8 WebSocket close codes
 
@@ -384,6 +393,20 @@ After acknowledging, the agent **MUST** still emit exactly one terminal message 
 `targetId`: either an `err` with code `CANCELLED`, or — for an execution — an
 `evt exec.exit` with `exitReason: "cancelled"`.
 
+**Which of the two, for an execution, is decided by whether a process exists**, not by timing:
+
+| State when the cancellation is processed | Terminal message |
+|---|---|
+| No process was created (cancelled before spawn, or the spawn failed) | `err CANCELLED` on the `exec.start` request. **No** `exec.exit`. |
+| A process exists, and `res exec.start` has already been sent | `evt exec.exit` with `exitReason: "cancelled"` |
+| A process exists, but `res exec.start` has **not** yet been sent | The agent **MUST** send `res exec.start` first, and then `evt exec.exit`. |
+
+The third row resolves a race every implementation will meet: a cancellation arriving between
+the spawn and the response. The rule is that once a process exists, the server is entitled to
+learn its pid and the command line that was actually used — that information belongs in the
+audit record whether or not the process was allowed to finish. Suppressing the response to
+save a frame would lose the only record of what ran.
+
 For a running process the agent **MUST** terminate the entire job object (the whole process
 tree). It **SHOULD** first attempt graceful termination by delivering `CTRL_BREAK_EVENT` to
 the process group and waiting `gracePeriodMs` (default 2000) before a hard kill.
@@ -497,7 +520,7 @@ entries whenever two entries compare equal.
 | `entry` | FileEntry \| null | Null when `exists` is false |
 | `realPath` | string \| null | Fully resolved path, when `resolveLinks` was set and a reparse point was traversed |
 | `sniff` | object \| null | `{isProbablyText, encoding, hasBom, lineEnding, sampledBytes}`. `lineEnding` is `"crlf"` \| `"lf"` \| `"cr"` \| `"mixed"` \| `"none"`. |
-| `sha256` | string \| null | Lowercase hex; only when requested and the file is within the policy's `maxHashBytes` |
+| `sha256` | string \| null | Lowercase hex; only when requested. `null` when not requested, **or** when the file exceeds the policy's `limits.maxHashBytes` — exceeding that limit is **not** an error, because the rest of the stat result is still useful and failing the whole call over an optional field would be unhelpful. |
 | `volume` | object \| null | `{driveType, fileSystem, freeBytes, totalBytes}`; `driveType` is `"fixed"` \| `"network"` \| `"removable"` \| `"ram"` \| `"cdrom"` |
 
 **A non-existent path is a successful response with `exists: false`, not an error.**
@@ -927,9 +950,18 @@ destroys throughput. A 4-minute build would block a 20-millisecond directory lis
 
 - Responses **MAY** arrive in any order. Receivers **MUST NOT** assume FIFO.
 - Events sharing a `corr` **MUST** be delivered in `seq` order, **gapless**, starting at 0.
-- `exec.exit` **MUST** be the last event for its `corr`.
-- A receiver detecting a gap in `seq` **MUST** fail that request rather than silently
-  proceeding with missing output.
+  Each direction has its own independent sequence space for a given `corr`: the agent numbers
+  the events it sends, and the server numbers `exec.ack` separately (§5.3).
+- `exec.exit` **MUST** be the last event the agent sends for its `corr`.
+- **The server** — the receiver of the agent's event stream — **MUST** fail a request on
+  detecting a gap in `seq`, rather than silently proceeding with missing output. A gap means
+  output was lost, and a result with a hole in it is worse than an error.
+
+This gap rule applies **only** to the agent's event stream. It deliberately does **not** apply
+to `exec.ack`, which travels the other way and is cumulative by design: a lost or reordered
+acknowledgement is superseded by the next one and **MUST NOT** cause the agent to fail
+anything (§9.3). The asymmetry is intentional — output is data that cannot be reconstructed,
+whereas an acknowledgement is a running total that repairs itself.
 
 WebSocket already guarantees ordered delivery on one connection, so these hold naturally —
 they are stated so that an agent which parallelises chunk encoding internally does not
@@ -1101,6 +1133,21 @@ Checking only the lexical path is the most likely security hole in a naive imple
 `C:\src\link` may be a junction to `C:\Users`. `C:\PROGRA~1` is `C:\Program Files`. Neither
 is visible to string manipulation.
 
+**Ordering matters, and the order is fixed.** Lexical canonicalisation happens **first**, and
+its `..` resolution is purely textual; the final-path call happens **second**, on the result.
+The two orders are not equivalent, and the difference is exploitable.
+
+Consider `C:\src\junction\..` where `junction` is a reparse point to `C:\Users`:
+
+| Order | Result | Verdict |
+|---|---|---|
+| Lexical `..` first, then final path | `C:\src` → final path `C:\src` | **Required.** Matches what the caller wrote and what the operator's root means. |
+| Final path first, then lexical `..` | `C:\Users\..` → `C:\` | Wrong, and it silently walks out of the root. |
+
+So: resolve `..` textually, then ask the operating system what the resulting path really is,
+then evaluate policy on that answer. An agent **MUST NOT** apply `..` resolution to a path
+that has already been expanded through a reparse point.
+
 **Long paths.** Paths beyond 260 characters **MUST** be supported, either by prefixing
 `\\?\` internally — noting that this prefix disables further normalisation by the OS, so
 canonicalisation must already be complete — or by declaring long-path awareness in the
@@ -1141,9 +1188,18 @@ than the path.
 2. **No BOM:** examine the first 8 KiB. A regular pattern of `NUL` bytes in alternating
    positions suggests UTF-16.
 3. Attempt a strict UTF-8 decode. If it succeeds, the content is UTF-8.
-4. If at least 1 % of the sample consists of bytes outside printable and common control
-   ranges after the above, classify as **binary**.
-5. Otherwise fall back to the policy's `defaultAnsiEncoding` (default `cp1252`).
+4. If at least 1 % of the sample consists of bytes outside the **textual set**, classify as
+   **binary**. The textual set is defined exactly, so that two implementations classify the
+   same file the same way: bytes `0x09` (tab), `0x0A` (line feed), `0x0D` (carriage return),
+   `0x1B` (escape), and `0x20`–`0xFF`. Everything else — the remaining C0 control codes and
+   `0x7F` — counts against the threshold. A single `0x00` byte in the sample classifies the
+   content as binary regardless of the ratio.
+5. Otherwise fall back to the policy's `fs.defaultAnsiEncoding` (default `cp1252`).
+
+Sniffing is a heuristic and the specification does not pretend otherwise. What it does
+guarantee is that the heuristic is **reproducible**: the same bytes yield the same verdict in
+every conforming agent, which is what lets a caller trust `encoding` and `decodeErrors` rather
+than having to second-guess whose agent produced them.
 
 The agent **MUST** report the encoding it chose and **MUST** report `decodeErrors` above
 zero when replacement characters were substituted, so the caller can tell that the guess may

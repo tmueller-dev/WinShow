@@ -77,7 +77,11 @@
       "properties": {
         "policyVersion": { "type": "string" },
         "policyHash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
-        "state": { "type": "string", "enum": ["ok", "invalid"] },
+        "state": {
+          "type": "string",
+          "enum": ["ok", "invalid", "stale"],
+          "description": "'ok' = the file on disk is loaded and serving. 'invalid' = no valid policy is loaded and every operation is refused. 'stale' = a hot reload failed validation, so an EARLIER policy is still loaded and serving; policyHash names the loaded one, not the file on disk."
+        },
         "readRoots": { "type": "array", "items": { "$ref": "#/$defs/windowsPath" } },
         "denyGlobCount": { "type": "integer", "minimum": 0 },
         "denyGlobs": { "type": "array", "items": { "type": "string" } },
