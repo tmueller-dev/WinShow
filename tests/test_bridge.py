@@ -244,6 +244,69 @@ class TestLimits:
         await asyncio.gather(serving, return_exceptions=True)
 
 
+class TestTraceContext:
+    async def test_traceparent_reaches_the_wire_envelope(self, linked: Any) -> None:
+        # §9.1 of the architecture: the traceparent is propagated from /mcp into the
+        # envelope's `trace` field, so one search follows a call across two protocols and
+        # two machines.
+        bridge, agent, _ = linked
+        agent.on(Op.FS_LIST, lambda _id, p: {"path": p["path"], "entries": [], "total": 0})
+        traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+
+        await bridge.call(Op.FS_LIST, {"path": "C:\\"}, trace=traceparent)
+
+        sent = [e for e in agent.received if e.op == Op.FS_LIST]
+        assert sent, "the request never arrived"
+        assert sent[-1].trace == traceparent
+
+    async def test_absent_traceparent_is_simply_omitted(self, linked: Any) -> None:
+        bridge, agent, _ = linked
+        agent.on(Op.FS_LIST, lambda _id, p: {"path": p["path"], "entries": [], "total": 0})
+        await bridge.call(Op.FS_LIST, {"path": "C:\\"})
+        sent = [e for e in agent.received if e.op == Op.FS_LIST]
+        assert sent[-1].trace is None
+
+
+class TestChunkedRead:
+    async def test_a_chunked_read_is_reassembled(self, linked: Any) -> None:
+        # §4.3: a read too large for one frame arrives as fs.read.chunk events followed
+        # by a response with `data` omitted and `chunked: true`. Without reassembly the
+        # caller gets an empty file and no indication anything was lost.
+        bridge, agent, _ = linked
+
+        async def handler(message_id: str, payload: dict[str, Any]) -> None:
+            for part in ("first ", "second ", "third"):
+                await agent.event(
+                    message_id, Op.FS_READ_CHUNK, {"seq": 0, "data": part, "encoding": "utf-8"}
+                )
+            await agent.respond(
+                message_id,
+                Op.FS_READ,
+                {
+                    "path": payload["path"],
+                    "encoding": "utf-8",
+                    "chunked": True,
+                    "byteLength": 18,
+                    "fileSize": 18,
+                    "eof": True,
+                },
+            )
+
+        agent.on(Op.FS_READ, handler)
+        result = await bridge.call(Op.FS_READ, {"path": "C:\\big.log", "offset": 0})
+        assert result["data"] == "first second third"
+        assert result["chunked"] is True
+
+    async def test_an_unchunked_read_is_untouched(self, linked: Any) -> None:
+        bridge, agent, _ = linked
+        agent.on(
+            Op.FS_READ,
+            lambda _id, p: {"path": p["path"], "data": "inline", "encoding": "utf-8"},
+        )
+        result = await bridge.call(Op.FS_READ, {"path": "C:\\small.log", "offset": 0})
+        assert result["data"] == "inline"
+
+
 class TestDisconnect:
     async def test_execution_returns_partial_output(self, settings: Settings) -> None:
         # §8.2 of the architecture: a truncated build log is useful, so what arrived is

@@ -337,6 +337,30 @@ class TestRunCommand:
         assert "super-secret-value" not in written
 
 
+class TestTraceparentExtraction:
+    """The header half of the Trace Context propagation (§9.1)."""
+
+    def test_header_is_read_from_the_originating_request(self) -> None:
+        from types import SimpleNamespace
+
+        from winshow.mcp.tools import _traceparent
+
+        traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+        context = SimpleNamespace(request=SimpleNamespace(headers={"traceparent": traceparent}))
+        assert _traceparent(context) == traceparent
+
+    def test_missing_pieces_are_tolerated(self) -> None:
+        # A tool call can arrive without an HTTP request behind it — over stdio, or in a
+        # test — and a missing trace is never a reason to fail the call.
+        from types import SimpleNamespace
+
+        from winshow.mcp.tools import _traceparent
+
+        assert _traceparent(None) is None
+        assert _traceparent(SimpleNamespace(request=None)) is None
+        assert _traceparent(SimpleNamespace(request=SimpleNamespace(headers={}))) is None
+
+
 class TestOutputSchemaConformance:
     """Every result must validate against the schema its tool advertises.
 

@@ -121,6 +121,23 @@ class _ProgressPump:
             log.debug("progress.send_failed", extra={"event": "progress.send_failed"})
 
 
+def _traceparent(context: Any) -> str | None:
+    """Extract the W3C Trace Context header from the originating HTTP request.
+
+    `docs/02-architecture.md` §9.1: the `traceparent` value is propagated from `/mcp`
+    into the wire envelope's `trace` field, so one call can be followed from the client
+    through this server to the agent's decision and the process it started. The MCP
+    revision publishing 2026-07-28 formalises Trace Context, so carrying it now costs
+    nothing and saves a change later.
+    """
+    request = getattr(context, "request", None)
+    headers = getattr(request, "headers", None)
+    if headers is None:
+        return None
+    value = headers.get("traceparent")
+    return str(value) if value else None
+
+
 def _ok(data: dict[str, Any], text: str) -> types.CallToolResult:
     return types.CallToolResult(
         content=[types.TextContent(type="text", text=text)],
@@ -245,7 +262,9 @@ def build_mcp_server(bridge: AgentBridge, audit: AuditLog) -> Server[Any, Any]:
         except LookupError:
             context = None
 
-        with bind_context(mcp_request_id=request_id, tool=name):
+        with bind_context(
+            mcp_request_id=request_id, tool=name, traceparent=_traceparent(context)
+        ):
             try:
                 return await handler(bridge, audit, arguments, context)
             except WinShowError as exc:
@@ -289,7 +308,7 @@ async def _list_directory(
     if args.kinds:
         payload["kinds"] = args.kinds
 
-    result = await bridge.call(Op.FS_LIST, payload)
+    result = await bridge.call(Op.FS_LIST, payload, trace=_traceparent(context))
     data = {
         "path": result.get("path", args.path),
         "entries": [_entry_out(e) for e in result.get("entries", [])],
@@ -314,6 +333,7 @@ async def _stat_path(
             "sniff": args.sniff,
             "hash": args.hash,
         },
+        trace=_traceparent(context),
     )
     sniff = result.get("sniff")
     data = {
@@ -383,7 +403,7 @@ async def _read_file(
     if args.max_bytes is not None:
         payload["maxBytes"] = args.max_bytes
 
-    result = await bridge.call(Op.FS_READ, payload)
+    result = await bridge.call(Op.FS_READ, payload, trace=_traceparent(context))
     encoding = result.get("encoding", "utf-8")
     data = {
         "content": result.get("data") or "",
@@ -424,6 +444,7 @@ async def _find_files(
             "stat": args.with_stat,
         },
         timeout_ms=args.time_budget_ms + 5_000,
+        trace=_traceparent(context),
     )
     raw_matches = result.get("matches", [])
     data = {
@@ -461,6 +482,7 @@ async def _search_files(
             "timeBudgetMs": args.time_budget_ms,
         },
         timeout_ms=args.time_budget_ms + 5_000,
+        trace=_traceparent(context),
     )
     data = {
         "matches": result.get("matches", []),
@@ -544,6 +566,7 @@ async def _run_command(
             timeout_ms=args.timeout_ms,
             on_output=pump.feed if pump else None,
             progress_token=context.meta.progressToken if pump and context.meta else None,
+            trace=_traceparent(context),
         )
     except WinShowError as exc:
         wire_details = exc.error.details or {}

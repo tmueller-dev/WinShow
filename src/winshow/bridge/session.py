@@ -415,6 +415,14 @@ class AgentSession:
             set_exec_running(self._exec_running)
             return
 
+        if entry.op == Op.FS_READ and payload.get("chunked"):
+            # §4.3: a read too large for one frame arrives as `fs.read.chunk` events
+            # followed by a response carrying the metadata with `data` omitted. The
+            # chunks share the correlation's gapless sequence space, and the response is
+            # sent after them on the same ordered connection, so they are all present by
+            # the time we get here and joining in arrival order *is* joining in seq order.
+            payload = {**payload, "data": "".join(entry.read_chunks)}
+
         entry.resolve(payload)
 
     def _on_error(self, env: Envelope) -> None:
