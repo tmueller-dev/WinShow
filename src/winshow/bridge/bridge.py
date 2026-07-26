@@ -19,9 +19,14 @@ import contextlib
 import time
 from typing import Any
 
-from winshow.bridge.session import AgentSession, OutputCallback
+from winshow.bridge.session import AgentSession, OutputCallback, ReviewCallback
 from winshow.config import Settings
-from winshow.errors import AgentUnavailable, WinShowError, WireErrorCode
+from winshow.errors import (
+    AgentSuperseded,
+    AgentUnavailable,
+    WinShowError,
+    WireErrorCode,
+)
 from winshow.observability.logging import get_logger
 from winshow.observability.metrics import (
     record_reconnect,
@@ -89,6 +94,19 @@ class AgentBridge:
                 "superseded",
                 "A newer agent connection replaced this one.",
                 by_session_id=session.session_id,
+            )
+            # Requests still in flight on the evicted connection fail with
+            # AGENT_SUPERSEDED rather than AGENT_DISCONNECTED. Both are transient and
+            # retryable, but they describe different events: the host did not go away,
+            # it dialled in again. An operator reading "disconnected" would go looking
+            # for a network fault that never happened.
+            incumbent.close_error = AgentSuperseded(
+                "The agent connection was replaced by a newer one while this request was "
+                "in flight.",
+                details={
+                    "evictedSessionId": incumbent.session_id,
+                    "bySessionId": session.session_id,
+                },
             )
             # 4009 — superseded. The eviction happens after the newcomer is installed so
             # there is no window in which the slot is empty.
@@ -172,6 +190,7 @@ class AgentBridge:
         *,
         timeout_ms: int | None = None,
         on_output: OutputCallback | None = None,
+        on_review: ReviewCallback | None = None,
         progress_token: str | int | None = None,
         trace: str | None = None,
     ) -> dict[str, Any]:
@@ -194,6 +213,7 @@ class AgentBridge:
                         payload,
                         timeout_ms=timeout_ms,
                         on_output=on_output,
+                        on_review=on_review,
                         progress_token=progress_token,
                         trace=trace,
                     )

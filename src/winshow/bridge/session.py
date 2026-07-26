@@ -48,12 +48,14 @@ from winshow.wire.messages import (
     PingResponse,
 )
 
-__all__ = ["AgentSession", "Negotiated", "OutputCallback", "WebSocketLike"]
+__all__ = ["AgentSession", "Negotiated", "OutputCallback", "ReviewCallback", "WebSocketLike"]
 
 log = get_logger(__name__)
 
 #: Called with each `exec.output` event as it is consumed, for progress streaming.
 OutputCallback = Callable[[ExecOutputEvent], Awaitable[None]]
+#: Called when the agent reports that a stage-2 policy review is running (§5.5).
+ReviewCallback = Callable[[int], Awaitable[None]]
 
 
 class WebSocketLike(Protocol):
@@ -114,6 +116,7 @@ class AgentSession:
 
         self._inflight: dict[str, InflightRequest] = {}
         self._output_callbacks: dict[str, OutputCallback] = {}
+        self._review_callbacks: dict[str, ReviewCallback] = {}
         self._send_lock = asyncio.Lock()
         self._pings: dict[str, tuple[str, float]] = {}
         self._seen_ids: set[str] = set()
@@ -179,6 +182,7 @@ class AgentSession:
         *,
         timeout_ms: int | None = None,
         on_output: OutputCallback | None = None,
+        on_review: ReviewCallback | None = None,
         progress_token: str | int | None = None,
         trace: str | None = None,
     ) -> dict[str, Any]:
@@ -218,6 +222,8 @@ class AgentSession:
         self._inflight[request_id] = entry
         if on_output is not None:
             self._output_callbacks[request_id] = on_output
+        if on_review is not None:
+            self._review_callbacks[request_id] = on_review
         set_inflight(len(self._inflight))
 
         try:
@@ -254,6 +260,7 @@ class AgentSession:
         finally:
             self._inflight.pop(request_id, None)
             self._output_callbacks.pop(request_id, None)
+            self._review_callbacks.pop(request_id, None)
             set_inflight(len(self._inflight))
             self._slots.release()
 
@@ -486,7 +493,15 @@ class AgentSession:
         elif op == Op.FS_READ_CHUNK:
             entry.read_chunks.append(str(payload.get("data", "")))
         elif op == Op.POLICY_REVIEWING:
+            # §5.5: this carries no authorization meaning and MUST NOT be treated as an
+            # approval. Its only purpose is to let the server tell the caller the request
+            # is under review rather than merely slow.
             entry.under_review = True
+            review = self._review_callbacks.get(entry.id)
+            if review is not None:
+                elapsed = int(payload.get("elapsedMs", 0) or 0)
+                with contextlib.suppress(Exception):
+                    await review(elapsed)
         else:
             log.debug("agent.unknown_event", extra={"event": "agent.unknown_event", "op": op})
 

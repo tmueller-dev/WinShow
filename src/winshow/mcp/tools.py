@@ -105,15 +105,28 @@ class _ProgressPump:
             return
         await self._flush(now)
 
+    async def note_review(self, elapsed_ms: int) -> None:
+        """Report that the host's stage-2 policy review is running (§5.5).
+
+        Carries no authorization meaning. Its purpose is to distinguish "under review"
+        from "merely slow", which is otherwise indistinguishable from a hung command.
+        """
+        await self._send(
+            f"Waiting on the host's policy review ({elapsed_ms} ms so far)…", self._bytes
+        )
+
     async def _flush(self, now: float) -> None:
         self._last_sent = now
         message = self._pending.strip()
         self._pending = ""
+        await self._send(message or None, self._bytes)
+
+    async def _send(self, message: str | None, progress: int) -> None:
         try:
             await self._session.send_progress_notification(
                 progress_token=self._token,
-                progress=float(self._bytes),
-                message=message or None,
+                progress=float(progress),
+                message=message,
                 related_request_id=self._related,
             )
         except Exception:
@@ -565,6 +578,7 @@ async def _run_command(
             payload,
             timeout_ms=args.timeout_ms,
             on_output=pump.feed if pump else None,
+            on_review=pump.note_review if pump else None,
             progress_token=context.meta.progressToken if pump and context.meta else None,
             trace=_traceparent(context),
         )

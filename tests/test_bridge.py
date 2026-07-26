@@ -18,6 +18,7 @@ from winshow.config import Settings
 from winshow.errors import (
     AgentDisconnected,
     AgentProtocolError,
+    AgentSuperseded,
     AgentUnavailable,
     WinShowError,
     WireError,
@@ -244,6 +245,47 @@ class TestLimits:
         await asyncio.gather(serving, return_exceptions=True)
 
 
+class TestPolicyReview:
+    async def test_a_slow_review_is_reported_to_the_caller(self, linked: Any) -> None:
+        # §5.5: the event exists so the server can say "under review" rather than leaving
+        # the caller unable to tell a policy check from a hung command. It carries no
+        # authorization meaning.
+        bridge, agent, _ = linked
+        reported: list[int] = []
+
+        async def handler(message_id: str, _payload: dict[str, Any]) -> None:
+            await agent.event(
+                message_id, Op.POLICY_REVIEWING, {"stage": "modelReview", "elapsedMs": 1800}
+            )
+            await agent.respond(
+                message_id,
+                Op.EXEC_START,
+                {
+                    "pid": 7,
+                    "startedAt": "2026-07-26T18:00:00.000Z",
+                    "resolvedExecutable": "x",
+                    "resolvedCwd": "C:\\",
+                    "commandLineUsed": "x",
+                },
+            )
+            await agent.event(
+                message_id,
+                Op.EXEC_EXIT,
+                {"exitCode": 0, "exitReason": "exited", "durationMs": 5},
+            )
+
+        agent.on(Op.EXEC_START, handler)
+
+        async def on_review(elapsed_ms: int) -> None:
+            reported.append(elapsed_ms)
+
+        result = await bridge.call(
+            Op.EXEC_START, {"argv": ["x"]}, on_review=on_review
+        )
+        assert result["exitCode"] == 0
+        assert reported == [1800], "the review event never reached the caller"
+
+
 class TestTraceContext:
     async def test_traceparent_reaches_the_wire_envelope(self, linked: Any) -> None:
         # §9.1 of the architecture: the traceparent is propagated from /mcp into the
@@ -434,6 +476,34 @@ class TestSlot:
         assert byes[-1].p is not None
         assert byes[-1].p["reason"] == "superseded"
         assert byes[-1].p["bySessionId"] == second.session_id
+
+        for agent, task in ((agent_a, serve_a), (agent_b, serve_b)):
+            await agent.stop()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def test_eviction_fails_in_flight_requests_as_superseded(
+        self, settings: Settings
+    ) -> None:
+        # AGENT_SUPERSEDED and AGENT_DISCONNECTED are both transient and retryable, but
+        # they describe different events. An operator told "disconnected" would go
+        # looking for a network fault that never happened: the host did not go away, it
+        # dialled in again.
+        bridge = AgentBridge(settings)
+        first, agent_a, _ws_a, serve_a = await connected_session(settings)
+        await bridge.attach(first)
+        agent_a.on(Op.FS_LIST, lambda _id, _p: None)  # never answers
+
+        call = asyncio.create_task(bridge.call(Op.FS_LIST, {"path": "C:\\"}))
+        await asyncio.sleep(0.02)
+
+        second, agent_b, _ws_b, serve_b = await connected_session(settings)
+        await bridge.attach(second)
+
+        with pytest.raises(AgentSuperseded) as caught:
+            await asyncio.wait_for(call, timeout=2.0)
+        assert caught.value.code == "AGENT_SUPERSEDED"
+        assert caught.value.retryable is True
 
         for agent, task in ((agent_a, serve_a), (agent_b, serve_b)):
             await agent.stop()
