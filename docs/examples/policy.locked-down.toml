@@ -1,0 +1,88 @@
+# WinShow agent policy — locked down
+#
+# A production server whose only purpose is letting an assistant read one application's logs.
+# No execution, no writes, no process visibility, and denials disclosed as "not found".
+#
+# Note the tradeoff on denialDisclosure. Setting it to "notfound" means a path outside every
+# read root is reported as non-existent rather than denied, so the tool surface reveals
+# nothing about what is on the disk. The cost is real: when the operator later cannot read a
+# file they expected to, the error says "not found" and gives them nothing to go on. The true
+# reason is still written to the local audit log — that is where they will have to look.
+# Choose this only when the MCP client is reachable by people who should not learn the
+# machine's layout.
+
+schemaVersion    = 1
+policyVersion    = "locked-down-2026-07-26"
+denialDisclosure = "notfound"
+
+[connection]
+serverUrl = "wss://winshow.example.com/agent"
+agentId   = "WS-APP-PROD-07"
+tokenFile = 'C:\ProgramData\WinShow\agent.token'
+
+# Pinning, because this host reaches the server through a corporate proxy that would
+# otherwise be able to present its own certificate. Two pins so that rotating the server
+# certificate does not strand the agent.
+tlsTrust = "pin"
+spkiPins = [
+  "sha256/K2v9WlZ0aQ4nJ8bXcYd3Ee5Ff7Gg9Hh1Ii3Jj5Kk7Ll8=",
+  "sha256/M4x1YnB2cR6pL0dZeAf5Gg7Hh9Ii1Jj3Kk5Ll7Mm9Nn0=",
+]
+
+proxy   = "http://proxy.corp.local:8080"
+noProxy = ["127.0.0.1", "::1"]
+
+heartbeatTimeoutMs = 60000
+reconnectMinMs     = 2000
+reconnectMaxMs     = 60000
+
+[limits]
+maxConcurrentRequests  = 4
+maxConcurrentProcesses = 0     # nothing may run, so nothing needs a slot
+maxReadBytes           = 2097152
+maxGlobResults         = 500
+maxGrepMatches         = 100
+
+[fs]
+enabled                   = true
+writeEnabled              = false
+followLinks               = false
+allowAlternateDataStreams = false
+auditReads                = true
+
+readRoots = ['D:\AppLogs']
+
+denyGlobs = [
+  '**\*.key',
+  '**\*.pem',
+  '**\*.pfx',
+  '**\credentials*',
+  '**\*secret*',
+]
+
+[[fs.rootOverrides]]
+path              = 'D:\AppLogs'
+allowedExtensions = [".log", ".txt"]   # not even the .etl traces
+
+[exec]
+enabled = false
+mode    = "disabled"
+
+# Stage 2 is off because stage 1 already permits nothing but reading two file types from one
+# directory. A model reviewer adds latency and a failure mode without narrowing anything.
+[modelReview]
+enabled = false
+
+[proc]
+listEnabled        = false
+includeCommandLine = false
+killEnabled        = false
+
+[logging]
+level          = "info"
+file           = 'C:\ProgramData\WinShow\logs\agent.jsonl'
+auditFile      = 'C:\ProgramData\WinShow\logs\audit.jsonl'
+maxFileBytes   = 16777216
+maxFiles       = 30            # keep a month of audit history on a production box
+eventLog       = true
+redactPatterns = ['(?i)(password|token|secret|apikey|bearer)\s*[=:]\s*\S+']

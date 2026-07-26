@@ -1,0 +1,92 @@
+// WSAP/1 transcript: heartbeat failure, reconnection, and eviction.
+//
+// Nothing is ever resumed. Every reconnection is a new session with a new sessionId, all
+// in-flight state is abandoned on both sides, and the agent terminates every process it
+// started. A build left running after the operator pulled the plug is exactly the kind of
+// orphan that makes people stop trusting a tool.
+//
+// ================================================================ connection 1
+// A->S  Handshake, abbreviated here to the fields that matter for this transcript.
+{"w":1,"t":"req","id":"h-1","op":"session.hello","ts":"2026-07-26T20:00:00.000Z","p":{"wireVersions":[1],"agentId":"WS-PROD-01","agent":{"name":"winshow-agent","version":"1.2.0","implementation":"python-3.11"},"os":{"platform":"windows","version":"10.0.19045","build":19045,"arch":"x64","is64Bit":true,"hostname":"WS-PROD-01","uptimeSeconds":942500},"identity":{"user":"NT SERVICE\\WinShowAgent","sid":"S-1-5-80-3245678901-2233445566-778899001-1122334455-5566778899","isService":true,"sessionId":0,"isElevated":false,"integrityLevel":"medium","privileges":["SeChangeNotifyPrivilege"]},"capabilities":["fs.list","fs.stat","fs.read","fs.glob","fs.grep","exec.start"],"limits":{"maxFrameBytes":1048576,"maxConcurrentRequests":16,"maxConcurrentProcesses":4,"maxOutputBytesPerExec":4194304,"maxExecMillis":300000,"maxReadBytes":1048576,"maxGlobResults":5000,"ackWindowChunks":64,"ackWindowBytes":4194304},"policy":{"policyVersion":"2026-07-20T09:00:00Z","policyHash":"sha256:9f2c1d4b8a3e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8","state":"ok","readRoots":["C:\\src","D:\\Logs"],"execMode":"allowlist","writeEnabled":false,"denialDisclosure":"explicit"},"clock":{"now":"2026-07-26T20:00:00.000Z","tzOffsetMinutes":120,"tzName":"W. Europe Standard Time"},"resumeOf":null}}
+{"w":1,"t":"res","id":"h-1","op":"session.hello","ts":"2026-07-26T20:00:00.055Z","p":{"wireVersion":1,"sessionId":"s-1111aaaa","server":{"name":"winshow-server","version":"0.1.0"},"serverTime":"2026-07-26T20:00:00.055Z","heartbeatIntervalMs":20000,"maxFrameBytes":1048576,"ackWindowChunks":64,"ackWindowBytes":4194304,"enabledOps":["fs.list","fs.stat","fs.read","fs.glob","fs.grep","exec.start"]}}
+
+// S->A  A build is started and is still running when the network goes away.
+{"w":1,"t":"req","id":"r-d001","op":"exec.start","ts":"2026-07-26T20:00:30.000Z","p":{"argv":["C:\\Program Files\\dotnet\\dotnet.exe","build","-c","Release"],"cwd":"C:\\src\\proj","timeoutMs":300000,"outputEncoding":"utf-8"}}
+{"w":1,"t":"res","id":"r-d001","op":"exec.start","ts":"2026-07-26T20:00:30.400Z","p":{"pid":9550,"startedAt":"2026-07-26T20:00:30.400Z","resolvedExecutable":"C:\\Program Files\\dotnet\\dotnet.exe","resolvedCwd":"C:\\src\\proj","commandLineUsed":"\"C:\\Program Files\\dotnet\\dotnet.exe\" build -c Release"}}
+{"w":1,"t":"evt","corr":"r-d001","seq":0,"op":"exec.output","ts":"2026-07-26T20:00:32.000Z","p":{"stream":"stdout","data":"Determining projects to restore...\r\n","encoding":"utf-8","bytes":36,"totalBytes":36,"dropped":false}}
+
+// S->A  Routine heartbeat, 20 s after the last one.
+{"w":1,"t":"req","id":"p-3","op":"session.ping","ts":"2026-07-26T20:00:40.000Z","p":{"nonce":"7d21ba"}}
+//
+// ---- The network partitions here. No frame is exchanged in either direction. ----
+//
+// SERVER SIDE: no response to p-3 and no traffic at all for 60 s. At 20:01:40 the server
+//   declares the peer dead, closes with code 1011, frees the agent slot, and fails every
+//   in-flight request. The MCP tool call that was waiting on r-d001 does NOT hang until the
+//   client's own timeout: the server completes it immediately with AGENT_DISCONNECTED,
+//   carrying the 36 bytes of output that did arrive, partial:true and
+//   exitReason:"disconnected". A truncated build log is useful; silence is not.
+//
+// AGENT SIDE: the agent has independently received nothing for 60 s. It also declares the
+//   link dead, closes, and then does the cleanup that matters: it closes the job object for
+//   pid 9550, which terminates dotnet and every compiler worker it had spawned. It does not
+//   buffer the pending response for a future connection, because there is no resumption and
+//   the requester has already been told the call failed.
+//
+// The agent then reconnects with full jitter: delay = random(0, min(60s, 1s * 2^attempt)).
+//
+// ================================================================ connection 2
+// A->S  A fresh handshake. resumeOf names the previous session, but it is INFORMATIONAL
+//       ONLY — it exists so the two sessions can be stitched together in a log, and it grants
+//       nothing. No request, no buffer, and no process survives across this boundary.
+{"w":1,"t":"req","id":"h-1","op":"session.hello","ts":"2026-07-26T20:01:43.700Z","p":{"wireVersions":[1],"agentId":"WS-PROD-01","agent":{"name":"winshow-agent","version":"1.2.0","implementation":"python-3.11"},"os":{"platform":"windows","version":"10.0.19045","build":19045,"arch":"x64","is64Bit":true,"hostname":"WS-PROD-01","uptimeSeconds":942603},"identity":{"user":"NT SERVICE\\WinShowAgent","sid":"S-1-5-80-3245678901-2233445566-778899001-1122334455-5566778899","isService":true,"sessionId":0,"isElevated":false,"integrityLevel":"medium","privileges":["SeChangeNotifyPrivilege"]},"capabilities":["fs.list","fs.stat","fs.read","fs.glob","fs.grep","exec.start"],"limits":{"maxFrameBytes":1048576,"maxConcurrentRequests":16,"maxConcurrentProcesses":4,"maxOutputBytesPerExec":4194304,"maxExecMillis":300000,"maxReadBytes":1048576,"maxGlobResults":5000,"ackWindowChunks":64,"ackWindowBytes":4194304},"policy":{"policyVersion":"2026-07-20T09:00:00Z","policyHash":"sha256:9f2c1d4b8a3e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8","state":"ok","readRoots":["C:\\src","D:\\Logs"],"execMode":"allowlist","writeEnabled":false,"denialDisclosure":"explicit"},"clock":{"now":"2026-07-26T20:01:43.700Z","tzOffsetMinutes":120,"tzName":"W. Europe Standard Time"},"resumeOf":"s-1111aaaa"}}
+// S->A  A new sessionId. Request ids are scoped to a connection, so "h-1" being reused is
+//       fine and expected.
+{"w":1,"t":"res","id":"h-1","op":"session.hello","ts":"2026-07-26T20:01:43.760Z","p":{"wireVersion":1,"sessionId":"s-2222bbbb","server":{"name":"winshow-server","version":"0.1.0"},"serverTime":"2026-07-26T20:01:43.760Z","heartbeatIntervalMs":20000,"maxFrameBytes":1048576,"ackWindowChunks":64,"ackWindowBytes":4194304,"enabledOps":["fs.list","fs.stat","fs.read","fs.glob","fs.grep","exec.start"]}}
+// S->A  Normal service resumes.
+{"w":1,"t":"req","id":"r-d010","op":"fs.list","ts":"2026-07-26T20:01:50.000Z","p":{"path":"C:\\src\\proj","limit":2}}
+{"w":1,"t":"res","id":"r-d010","op":"fs.list","ts":"2026-07-26T20:01:50.020Z","p":{"path":"C:\\src\\proj","total":2,"truncated":false,"truncationReason":null,"entries":[{"name":"proj.csproj","path":"C:\\src\\proj\\proj.csproj","kind":"file","size":812,"mtime":"2026-07-19T11:04:00.000Z","ctime":"2026-01-08T09:12:00.000Z","atime":"2026-07-26T20:01:50.000Z","attrs":["archive"],"linkTarget":null},{"name":"src","path":"C:\\src\\proj\\src","kind":"dir","size":0,"mtime":"2026-07-24T16:40:00.000Z","ctime":"2026-01-08T09:12:00.000Z","atime":"2026-07-26T20:01:50.000Z","attrs":[],"linkTarget":null}]}}
+
+// ================================================================ eviction: newest wins
+//
+// A different failure: a half-open TCP connection. The server still believes connection 2 is
+// healthy, but the agent's host already dropped it and reconnected. Both sides authenticate
+// with the same token, so the new connection is legitimate.
+//
+// Policy is NEWEST WINS. Rejecting the newcomer would leave the system broken until the
+// server's 60 s dead-peer timer fired; newest-wins self-heals in one round trip. The cost is
+// that a token holder can boot the incumbent — acceptable, since a token holder can already
+// run commands.
+//
+// A->S  (on a third socket) the same agent, having reconnected.
+{"w":1,"t":"req","id":"h-1","op":"session.hello","ts":"2026-07-26T20:05:12.000Z","p":{"wireVersions":[1],"agentId":"WS-PROD-01","agent":{"name":"winshow-agent","version":"1.2.0","implementation":"python-3.11"},"os":{"platform":"windows","version":"10.0.19045","build":19045,"arch":"x64","is64Bit":true,"hostname":"WS-PROD-01","uptimeSeconds":942812},"identity":{"user":"NT SERVICE\\WinShowAgent","sid":"S-1-5-80-3245678901-2233445566-778899001-1122334455-5566778899","isService":true,"sessionId":0,"isElevated":false,"integrityLevel":"medium","privileges":["SeChangeNotifyPrivilege"]},"capabilities":["fs.list","fs.stat","fs.read","fs.glob","fs.grep","exec.start"],"limits":{"maxFrameBytes":1048576,"maxConcurrentRequests":16,"maxConcurrentProcesses":4,"maxOutputBytesPerExec":4194304,"maxExecMillis":300000,"maxReadBytes":1048576,"maxGlobResults":5000,"ackWindowChunks":64,"ackWindowBytes":4194304},"policy":{"policyVersion":"2026-07-20T09:00:00Z","policyHash":"sha256:9f2c1d4b8a3e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8","state":"ok","readRoots":["C:\\src","D:\\Logs"],"execMode":"allowlist","writeEnabled":false,"denialDisclosure":"explicit"},"clock":{"now":"2026-07-26T20:05:12.000Z","tzOffsetMinutes":120,"tzName":"W. Europe Standard Time"},"resumeOf":"s-2222bbbb"}}
+// S->A  (on connection 2, the incumbent) the server evicts it before installing the newcomer.
+//       bySessionId names the successor so the two appear together in a log.
+{"w":1,"t":"evt","corr":"s-2222bbbb","seq":0,"op":"session.bye","ts":"2026-07-26T20:05:12.030Z","p":{"reason":"superseded","message":"Replaced by a newer agent connection.","bySessionId":"s-3333cccc"}}
+// The server then closes connection 2 with code 4009 and fails its in-flight requests with
+// the server-side code AGENT_SUPERSEDED.
+//
+// The evicted agent must NOT reconnect in a tight loop: it applies an elevated initial
+// backoff of at least 5 s and logs the eviction prominently, because in any case other than
+// a half-open socket it means two agents are sharing one token — a misconfiguration worth
+// making noise about.
+//
+// S->A  (on connection 3) the newcomer is welcomed.
+{"w":1,"t":"res","id":"h-1","op":"session.hello","ts":"2026-07-26T20:05:12.041Z","p":{"wireVersion":1,"sessionId":"s-3333cccc","server":{"name":"winshow-server","version":"0.1.0"},"serverTime":"2026-07-26T20:05:12.041Z","heartbeatIntervalMs":20000,"maxFrameBytes":1048576,"ackWindowChunks":64,"ackWindowBytes":4194304,"enabledOps":["fs.list","fs.stat","fs.read","fs.glob","fs.grep","exec.start"]}}
+
+// ================================================================ policy fails closed
+//
+// Finally, the operator edits policy.toml and introduces a syntax error. The agent's hot
+// reload validates before swapping, so the previous policy stays live and the error is
+// logged. But if the agent RESTARTS while the file is broken, it has no previous policy to
+// fall back to. It still connects — so the operator can see the problem through their MCP
+// client rather than wondering why the host went silent — and then refuses everything.
+//
+// A->S  A handshake advertising state:"invalid".
+{"w":1,"t":"req","id":"h-1","op":"session.hello","ts":"2026-07-26T21:30:00.000Z","p":{"wireVersions":[1],"agentId":"WS-PROD-01","agent":{"name":"winshow-agent","version":"1.2.0","implementation":"python-3.11"},"os":{"platform":"windows","version":"10.0.19045","build":19045,"arch":"x64","is64Bit":true,"hostname":"WS-PROD-01","uptimeSeconds":9},"identity":{"user":"NT SERVICE\\WinShowAgent","sid":"S-1-5-80-3245678901-2233445566-778899001-1122334455-5566778899","isService":true,"sessionId":0,"isElevated":false,"integrityLevel":"medium","privileges":["SeChangeNotifyPrivilege"]},"capabilities":["fs.list","fs.stat","fs.read","fs.glob","fs.grep","exec.start"],"limits":{"maxFrameBytes":1048576,"maxConcurrentRequests":16,"maxConcurrentProcesses":4,"maxOutputBytesPerExec":4194304,"maxExecMillis":300000,"maxReadBytes":1048576,"maxGlobResults":5000,"ackWindowChunks":64,"ackWindowBytes":4194304},"policy":{"policyVersion":"unknown","policyHash":"sha256:0000000000000000000000000000000000000000000000000000000000000000","state":"invalid","readRoots":[],"execMode":"disabled","writeEnabled":false,"denialDisclosure":"explicit"},"clock":{"now":"2026-07-26T21:30:00.000Z","tzOffsetMinutes":120,"tzName":"W. Europe Standard Time"},"resumeOf":null}}
+{"w":1,"t":"res","id":"h-1","op":"session.hello","ts":"2026-07-26T21:30:00.048Z","p":{"wireVersion":1,"sessionId":"s-4444dddd","server":{"name":"winshow-server","version":"0.1.0"},"serverTime":"2026-07-26T21:30:00.048Z","heartbeatIntervalMs":20000,"maxFrameBytes":1048576,"ackWindowChunks":64,"ackWindowBytes":4194304,"enabledOps":["fs.list","fs.stat","fs.read","fs.glob","fs.grep","exec.start"]}}
+// S->A  Any request at all.
+{"w":1,"t":"req","id":"r-e001","op":"fs.list","ts":"2026-07-26T21:30:05.000Z","p":{"path":"C:\\src"}}
+// A->S  Refused. Fail closed: no policy means no permissions, never a permissive default.
+//       The message tells the operator exactly which file to go and fix.
+{"w":1,"t":"err","id":"r-e001","op":"fs.list","ts":"2026-07-26T21:30:05.002Z","e":{"code":"POLICY_UNAVAILABLE","class":"policy","retryable":false,"message":"No valid policy is loaded; all operations are refused.","rule":"policy.state","details":{"reason":"Failed to parse C:\\ProgramData\\WinShow\\policy.toml at line 44: expected '=' after key.","reasonSource":"agent"}}}

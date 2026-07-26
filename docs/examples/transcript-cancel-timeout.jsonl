@@ -1,0 +1,53 @@
+// WSAP/1 transcript: cancellation and timeout.
+//
+// Both are terminations the agent performs on a process it owns, and both preserve the
+// output captured so far. A truncated build log is still the most useful thing anyone has.
+//
+// ---------------------------------------------------------------- cancellation
+// S->A  A long-running build.
+{"w":1,"t":"req","id":"r-c001","op":"exec.start","ts":"2026-07-26T19:10:00.000Z","p":{"argv":["C:\\Program Files\\dotnet\\dotnet.exe","build","-c","Release","--no-incremental"],"cwd":"C:\\src\\proj","timeoutMs":900000,"maxOutputBytes":4194304,"outputEncoding":"utf-8"}}
+{"w":1,"t":"res","id":"r-c001","op":"exec.start","ts":"2026-07-26T19:10:00.410Z","p":{"pid":9104,"startedAt":"2026-07-26T19:10:00.410Z","resolvedExecutable":"C:\\Program Files\\dotnet\\dotnet.exe","resolvedCwd":"C:\\src\\proj","commandLineUsed":"\"C:\\Program Files\\dotnet\\dotnet.exe\" build -c Release --no-incremental"}}
+{"w":1,"t":"evt","corr":"r-c001","seq":0,"op":"exec.output","ts":"2026-07-26T19:10:02.100Z","p":{"stream":"stdout","data":"Determining projects to restore...\r\n","encoding":"utf-8","bytes":36,"totalBytes":36,"dropped":false}}
+{"w":1,"t":"evt","corr":"r-c001","seq":0,"op":"exec.ack","ts":"2026-07-26T19:10:02.104Z","p":{"ackSeq":0,"ackBytes":36}}
+{"w":1,"t":"evt","corr":"r-c001","seq":1,"op":"exec.output","ts":"2026-07-26T19:10:06.550Z","p":{"stream":"stdout","data":"  Restored C:\\src\\proj\\proj.csproj (in 4.10 sec).\r\n","encoding":"utf-8","bytes":51,"totalBytes":87,"dropped":false}}
+// S->A  The MCP client sent notifications/cancelled, so the server cancels. There is exactly
+//       one cancellation mechanism, fed by three triggers: client cancellation, client
+//       disconnect, and a server deadline. One path means one set of bugs.
+{"w":1,"t":"req","id":"x-1","op":"session.cancel","ts":"2026-07-26T19:10:09.000Z","p":{"targetId":"r-c001","reason":"client_cancelled"}}
+// A->S  Acknowledged. Cancellation is idempotent and racy by nature: cancelling an unknown
+//       or already-finished id would return cancelled:false and would NOT be an error.
+{"w":1,"t":"res","id":"x-1","op":"session.cancel","ts":"2026-07-26T19:10:09.004Z","p":{"targetId":"r-c001","cancelled":true}}
+// A->S  Acknowledging is not enough: the agent still owes exactly one terminal message for
+//       the original request. It delivered CTRL_BREAK_EVENT to the process group, waited the
+//       2 s grace period, then closed the job object, which killed the whole tree — dotnet
+//       plus the three compiler workers it had spawned, hence killedProcesses:4.
+//       exitReason is what carries the meaning here; exitCode 1 is just what
+//       TerminateProcess was handed and means nothing.
+{"w":1,"t":"evt","corr":"r-c001","seq":2,"op":"exec.exit","ts":"2026-07-26T19:10:11.220Z","p":{"exitCode":1,"exitCodeSigned":1,"exitReason":"cancelled","startedAt":"2026-07-26T19:10:00.410Z","endedAt":"2026-07-26T19:10:11.204Z","durationMs":10794,"stdoutBytes":87,"stderrBytes":0,"truncated":false,"truncationReason":null,"cpuTimeMs":8320,"peakWorkingSetBytes":298844160,"killedProcesses":4}}
+
+// ---------------------------------------------------------------- timeout
+// S->A  A command with a deliberately short timeout. The agent's timeout is the authoritative
+//       one, because the agent owns the process and can actually kill it; the server keeps a
+//       safety-net timer a few seconds longer, and if that one ever fires it means the agent
+//       is misbehaving.
+{"w":1,"t":"req","id":"r-c002","op":"exec.start","ts":"2026-07-26T19:12:00.000Z","p":{"shell":"powershell","commandLine":"Get-EventLog -LogName System -Newest 5000","cwd":"C:\\src","timeoutMs":5000,"outputEncoding":"utf-8"}}
+{"w":1,"t":"res","id":"r-c002","op":"exec.start","ts":"2026-07-26T19:12:00.180Z","p":{"pid":9330,"startedAt":"2026-07-26T19:12:00.180Z","resolvedExecutable":"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe","resolvedCwd":"C:\\src","commandLineUsed":"\"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -NonInteractive -NoLogo -ExecutionPolicy Bypass -Command \"[Console]::OutputEncoding=[Text.Encoding]::UTF8; $OutputEncoding=[Text.Encoding]::UTF8; Get-EventLog -LogName System -Newest 5000\""}}
+{"w":1,"t":"evt","corr":"r-c002","seq":0,"op":"exec.output","ts":"2026-07-26T19:12:01.500Z","p":{"stream":"stdout","data":"\r\n   Index Time          EntryType   Source\r\n   ----- ----          ---------   ------\r\n","encoding":"utf-8","bytes":78,"totalBytes":78,"dropped":false}}
+{"w":1,"t":"evt","corr":"r-c002","seq":1,"op":"exec.output","ts":"2026-07-26T19:12:03.900Z","p":{"stream":"stdout","data":"  482113 Jul 26 19:04  Information Service Control Manager\r\n","encoding":"utf-8","bytes":58,"totalBytes":136,"dropped":false}}
+// A->S  Timeout fired. The output captured so far is preserved and delivered — this is the
+//       whole point of not treating a timeout as a bare error. truncated is false because
+//       maxOutputBytes was never reached; the run was cut short by time, not by size.
+{"w":1,"t":"evt","corr":"r-c002","seq":2,"op":"exec.exit","ts":"2026-07-26T19:12:05.260Z","p":{"exitCode":1,"exitCodeSigned":1,"exitReason":"timeout","startedAt":"2026-07-26T19:12:00.180Z","endedAt":"2026-07-26T19:12:05.201Z","durationMs":5021,"stdoutBytes":136,"stderrBytes":0,"truncated":false,"truncationReason":null,"cpuTimeMs":4410,"peakWorkingSetBytes":96468992,"killedProcesses":1}}
+
+// ---------------------------------------------------------------- output cap reached
+// S->A  A command that produces far more than it is allowed to.
+{"w":1,"t":"req","id":"r-c003","op":"exec.start","ts":"2026-07-26T19:15:00.000Z","p":{"argv":["C:\\Windows\\System32\\tasklist.exe","/v","/fo","list"],"cwd":"C:\\src","timeoutMs":60000,"maxOutputBytes":4096,"outputEncoding":"utf-8"}}
+{"w":1,"t":"res","id":"r-c003","op":"exec.start","ts":"2026-07-26T19:15:00.090Z","p":{"pid":9401,"startedAt":"2026-07-26T19:15:00.090Z","resolvedExecutable":"C:\\Windows\\System32\\tasklist.exe","resolvedCwd":"C:\\src","commandLineUsed":"C:\\Windows\\System32\\tasklist.exe /v /fo list"}}
+{"w":1,"t":"evt","corr":"r-c003","seq":0,"op":"exec.output","ts":"2026-07-26T19:15:00.320Z","p":{"stream":"stdout","data":"Image Name:   System Idle Process\r\nPID:          0\r\n","encoding":"utf-8","bytes":50,"totalBytes":50,"dropped":false}}
+// A->S  dropped:true says output was discarded before this chunk. The cap is enforced by the
+//       agent, and the process runs to completion rather than being killed — the caller
+//       still gets a real exit code, just not all of the output.
+{"w":1,"t":"evt","corr":"r-c003","seq":1,"op":"exec.output","ts":"2026-07-26T19:15:00.480Z","p":{"stream":"stdout","data":"Image Name:   winlogon.exe\r\nPID:          812\r\n","encoding":"utf-8","bytes":46,"totalBytes":4096,"dropped":true}}
+// A->S  truncated is true with the reason, so nothing downstream mistakes a clipped listing
+//       for the whole truth.
+{"w":1,"t":"evt","corr":"r-c003","seq":2,"op":"exec.exit","ts":"2026-07-26T19:15:00.910Z","p":{"exitCode":0,"exitCodeSigned":0,"exitReason":"exited","startedAt":"2026-07-26T19:15:00.090Z","endedAt":"2026-07-26T19:15:00.902Z","durationMs":812,"stdoutBytes":4096,"stderrBytes":0,"truncated":true,"truncationReason":"maxOutputBytes","cpuTimeMs":190,"peakWorkingSetBytes":11534336,"killedProcesses":0}}

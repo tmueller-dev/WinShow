@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://winshow.example/schemas/wsap-v1-envelope.schema.json",
+  "title": "WSAP/1 message envelope",
+  "description": "Structural validation of any WSAP/1 frame. Payload contents are validated by wsap-v1-messages.schema.json. Normative companion to docs/03-agent-protocol.md section 2.",
+
+  "$defs": {
+    "correlationId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9._-]+$"
+    },
+    "operationName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z][a-z0-9]*(\\.[a-z][a-zA-Z0-9]*)*$"
+    },
+    "timestamp": {
+      "type": "string",
+      "description": "RFC 3339 UTC with milliseconds.",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?Z$"
+    },
+    "traceparent": {
+      "type": "string",
+      "description": "W3C Trace Context traceparent value.",
+      "pattern": "^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$"
+    },
+
+    "common": {
+      "type": "object",
+      "properties": {
+        "w": { "const": 1 },
+        "ts": { "$ref": "#/$defs/timestamp" },
+        "trace": { "$ref": "#/$defs/traceparent" }
+      },
+      "required": ["w"]
+    },
+
+    "request": {
+      "type": "object",
+      "required": ["w", "t", "id", "op", "p"],
+      "properties": {
+        "w": { "const": 1 },
+        "t": { "const": "req" },
+        "id": { "$ref": "#/$defs/correlationId" },
+        "op": { "$ref": "#/$defs/operationName" },
+        "ts": { "$ref": "#/$defs/timestamp" },
+        "trace": { "$ref": "#/$defs/traceparent" },
+        "p": { "type": "object" }
+      }
+    },
+
+    "response": {
+      "type": "object",
+      "required": ["w", "t", "id", "op", "p"],
+      "properties": {
+        "w": { "const": 1 },
+        "t": { "const": "res" },
+        "id": { "$ref": "#/$defs/correlationId" },
+        "op": { "$ref": "#/$defs/operationName" },
+        "ts": { "$ref": "#/$defs/timestamp" },
+        "trace": { "$ref": "#/$defs/traceparent" },
+        "p": { "type": "object" }
+      }
+    },
+
+    "error": {
+      "type": "object",
+      "required": ["w", "t", "id", "op", "e"],
+      "properties": {
+        "w": { "const": 1 },
+        "t": { "const": "err" },
+        "id": { "$ref": "#/$defs/correlationId" },
+        "op": { "$ref": "#/$defs/operationName" },
+        "ts": { "$ref": "#/$defs/timestamp" },
+        "trace": { "$ref": "#/$defs/traceparent" },
+        "e": { "$ref": "https://winshow.example/schemas/wsap-v1-errors.schema.json" }
+      }
+    },
+
+    "event": {
+      "type": "object",
+      "required": ["w", "t", "corr", "seq", "op", "p"],
+      "properties": {
+        "w": { "const": 1 },
+        "t": { "const": "evt" },
+        "corr": { "$ref": "#/$defs/correlationId" },
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Zero-based, strictly incrementing per corr, gapless."
+        },
+        "op": { "$ref": "#/$defs/operationName" },
+        "ts": { "$ref": "#/$defs/timestamp" },
+        "trace": { "$ref": "#/$defs/traceparent" },
+        "p": { "type": "object" }
+      }
+    }
+  },
+
+  "type": "object",
+  "required": ["w", "t"],
+  "properties": {
+    "t": { "enum": ["req", "res", "err", "evt"] }
+  },
+  "allOf": [
+    { "if": { "properties": { "t": { "const": "req" } }, "required": ["t"] }, "then": { "$ref": "#/$defs/request" } },
+    { "if": { "properties": { "t": { "const": "res" } }, "required": ["t"] }, "then": { "$ref": "#/$defs/response" } },
+    { "if": { "properties": { "t": { "const": "err" } }, "required": ["t"] }, "then": { "$ref": "#/$defs/error" } },
+    { "if": { "properties": { "t": { "const": "evt" } }, "required": ["t"] }, "then": { "$ref": "#/$defs/event" } }
+  ]
+}
