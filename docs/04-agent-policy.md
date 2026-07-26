@@ -127,9 +127,23 @@ atomic: parse and validate the new content in full, and only then swap it in. A 
 applied policy is worse than either the old or the new one.
 
 If the new content fails to load, the agent **MUST** keep the previous policy, log at error
-level, and continue serving. It **SHOULD** additionally reflect the failure in the next
-handshake summary. A failed edit must never be a way to accidentally widen access, and it
-must never take a working host offline either.
+level, and continue serving. A failed edit must never be a way to accidentally widen access,
+and it must never take a working host offline either.
+
+It **MUST** also report `policy.state = "stale"` from then on, including in the next
+handshake summary. The three states are distinct and none of them substitutes for another:
+
+| `state` | Meaning | Operations |
+|---|---|---|
+| `ok` | The file on disk is loaded and serving | Served per the rules |
+| `invalid` | No valid policy is loaded at all | **All refused** with `POLICY_UNAVAILABLE` |
+| `stale` | A reload failed validation; an **earlier** policy is still loaded and serving | Served per the *earlier* rules |
+
+`stale` exists because neither of the others is honest about that situation. Reporting `ok`
+hides from the operator that their edit never took effect — they would go on believing the
+rule they just wrote is in force. Reporting `invalid` is simply false, since the agent is
+serving normally. When `state` is `stale`, `policyHash` names the policy that is **loaded**,
+not the file on disk, so comparing the two is how an operator confirms the discrepancy.
 
 ---
 
@@ -205,7 +219,17 @@ allowedExtensions = [".log", ".txt", ".json", ".etl"]
 `allowedExtensions`, when present, restricts reads under that root to those extensions. It
 is an allowlist and it is case-insensitive.
 
-### 4.4 `followLinks` and `allowAlternateDataStreams`
+### 4.4 Keys the protocol refers to by name
+
+Two keys are named normatively by [`03-agent-protocol.md`](03-agent-protocol.md) and are easy
+to overlook when reading the structure in §3, so they are called out here:
+
+| Key | Used by | Behaviour |
+|---|---|---|
+| `fs.defaultAnsiEncoding` | [§10.2](03-agent-protocol.md#102-encoding), the last step of encoding detection | The code page assumed when a file has no BOM, is not valid UTF-8, and does not look binary. Defaults to `cp1252`. Set it to the machine's actual ANSI code page if that differs. |
+| `limits.maxHashBytes` | [§4.2](03-agent-protocol.md#42-fsstat), `fs.stat` with `hash: "sha256"` | The largest file the agent will hash. A file above the limit returns `sha256: null` and is **not** an error — the rest of the stat result is still useful, and failing an entire call over an optional field would be unhelpful. |
+
+### 4.5 `followLinks` and `allowAlternateDataStreams`
 
 Both default to `false`, and both should usually stay there. `followLinks = true` requires
 the agent to perform cycle detection on resolved paths, or a junction pointing at its own
@@ -329,6 +353,24 @@ operator how it went. The legitimate use is a deliberate deployment or migration
 must not be interrupted by a network blip; the illegitimate use is treating it as a
 convenience, which produces exactly the orphaned builds that make people stop trusting the
 tool.
+
+**How this squares with the exactly-once rule.**
+[`03-agent-protocol.md` §5.4](03-agent-protocol.md#54-execexit--agent--server-evt) requires
+exactly one `exec.exit` per correlation, and a detached process appears to break that: the
+connection is gone, so nothing can be sent.
+
+It does not, because the obligation is scoped to a connection. Correlation identifiers are
+per-connection ([`03-agent-protocol.md` §8.5](03-agent-protocol.md#85-duplicate-request-identifiers)),
+and a connection that has closed has no correlations left to satisfy. When the socket drops,
+the server has already failed that request with `AGENT_DISCONNECTED`; there is no longer a
+peer waiting for a terminal event, and a later reconnection is a different session that
+resumes nothing.
+
+What the agent still owes is the **record**. A detached process **MUST** be written to the
+audit log on completion exactly as an attached one would be — exit code, reason, duration,
+byte counts — with a marker that it was detached and the identifier of the session it
+outlived. That log entry is the only way anyone will ever find out what happened, which is
+precisely why this setting deserves the warning above.
 
 ---
 
@@ -468,8 +510,8 @@ probing for gaps.
 | Field | Required | Notes |
 |---|---|---|
 | `policyVersion` | yes | The operator's label |
-| `policyHash` | yes | `sha256:` of the file bytes, so the operator can confirm what is live |
-| `state` | yes | `"ok"` or `"invalid"` |
+| `policyHash` | yes | `sha256:` of the bytes of the policy that is **loaded**. When `state` is `stale` this is the earlier policy, not the file on disk — comparing the two is how an operator detects a failed reload. |
+| `state` | yes | `"ok"`, `"invalid"`, or `"stale"` — see §2.2 |
 | `readRoots` | yes | The roots themselves — these are what make a denial actionable |
 | `denyGlobCount` or `denyGlobs` | no | A count is the safer choice on a shared deployment |
 | `execMode` | yes | |

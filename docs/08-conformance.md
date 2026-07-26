@@ -16,12 +16,13 @@ even if the miss looks cosmetic — several of the requirements below are load-b
 security in ways that are not obvious from the requirement text alone, which is why
 [§14](#14-the-security-critical-subset) calls the worst of them out separately.
 
-Items marked **SHOULD** are included where the specification states a strong recommendation
-and where a reviewer would reasonably want to see a deliberate decision rather than an
-oversight. They are prefixed `(SHOULD)` and do not affect conformance. Items that are
-requirements on the *server* rather than the agent are prefixed `(server)`; they are listed
-because an agent implementer benefits from knowing what the other end owes them, and because
-the WinShow server is itself an implementation that has to be checked.
+Items carry a prefix when they are anything other than a runtime MUST binding the agent:
+
+| Prefix | Meaning |
+|---|---|
+| `(SHOULD)` | A strong recommendation, included where a reviewer would want to see a deliberate decision rather than an oversight. Does not affect conformance. |
+| `(server)` | A requirement on the *server* rather than the agent. Listed because an agent implementer benefits from knowing what the other end owes them, and because the WinShow server is itself an implementation that has to be checked. |
+| `(deployment property)`, `(packaging property)` | A rule about what gets provisioned or shipped rather than about what a running agent does — token entropy (T-08) and the `LocalSystem` default (W-53). Neither is observable from the wire, so both are verified by inspecting tooling and installer output. That is an accurate description of the rule, not a weakness in it. |
 
 The intended way to use this document is to copy it into your own repository, work through
 it top to bottom with a test for each box, and keep it in the tree as a living record. The
@@ -143,9 +144,14 @@ silent hang.
 
 ### 2.2 Authentication
 
-- [ ] **T-08** The configured token is at least 32 bytes of CSPRNG output rendered as
-      printable ASCII; the agent refuses, or at minimum warns loudly, on a shorter one.
-      `03` §1.4
+- [ ] **T-08** *(deployment property — verified by inspecting the provisioning tooling, not
+      assertable at runtime)* Whoever generates the token derives it from at least 32 bytes of
+      CSPRNG output, presented as printable ASCII. Entropy is not observable in a string, so
+      no peer can check this; it is an obligation on the tooling and the operator. `03` §1.4
+- [ ] **T-36** (SHOULD, server) Refuses to start with a configured token shorter than 32
+      characters — the one failure of the entropy rule that *is* detectable. `03` §1.4
+- [ ] **T-37** (SHOULD) Logs a warning, on both sides, when the configured token is shorter
+      than 32 characters. `03` §1.4
 - [ ] **T-09** Transmits the token only in the `Authorization` header — never in a query
       string, never in a subprotocol value, never in a first frame. `03` §1.4
 - [ ] **T-10** Loads the token from a file or an OS secret store, not from its own source and
@@ -197,8 +203,12 @@ silent hang.
 - [ ] **T-31** Reassembles fragmented inbound frames correctly. `03` §1.7
 - [ ] **T-32** Honours the negotiated `maxFrameBytes` (default 1 MiB, hard ceiling 8 MiB) on
       both send and receive. `03` §1.7
-- [ ] **T-33** On receiving an oversized frame, replies `err FRAME_TOO_LARGE` when the frame
-      was parseable enough to correlate, and then closes with code `1009`. `03` §1.7
+- [ ] **T-33** On receiving a frame exceeding the negotiated maximum, **closes the connection
+      with code `1009`**. This is the assertable part, and the part a peer relies on. `03` §1.7
+- [ ] **T-38** (SHOULD) Sends `err FRAME_TOO_LARGE` carrying the offending `id` before that
+      close, but only when it actually has an `id`. An implementation whose WebSocket stack
+      aborted the oversized message before delivering any application bytes cannot name the
+      request and is still conforming. `03` §1.7
 - [ ] **T-34** Uses the documented close codes with their documented meanings: `1000`,
       `1001`, `1009`, `1011`, `4004`, `4008`, `4009`, `4013`. `03` §1.8
 - [ ] **T-35** Closes with `1001` — not `1011` — when the Windows service is stopping
@@ -317,7 +327,18 @@ silent hang.
       §8.4
 - [ ] **S-21** After acknowledging a cancel, still emits exactly one terminal message for
       `targetId` — an `err CANCELLED`, or an `evt exec.exit` with `exitReason: "cancelled"`
-      for an execution. `03` §3.3
+      for an execution. Which of the two is decided by **whether a process exists**, not by
+      timing; the three cases are S-30, S-31, and S-32. `03` §3.3
+- [ ] **S-30** No process was created — the cancellation arrived before the spawn, or the
+      spawn failed: the terminal message is `err CANCELLED` on the `exec.start` request, and
+      **no** `exec.exit` is emitted. `03` §3.3
+- [ ] **S-31** A process exists and `res exec.start` has already been sent: the terminal
+      message is `evt exec.exit` with `exitReason: "cancelled"`. `03` §3.3
+- [ ] **S-32** A process exists but `res exec.start` has **not** yet been sent — a
+      cancellation arriving between the spawn and the response: the agent sends
+      `res exec.start` **first**, and only then `evt exec.exit`. Suppressing the response to
+      save a frame loses the `pid` and `commandLineUsed`, which is the only record of what
+      actually ran. This is the row implementations get wrong. `03` §3.3
 - [ ] **S-22** Cancelling an execution terminates the entire job object, meaning the whole
       process tree and not merely the direct child. `03` §3.3
 - [ ] **S-23** (SHOULD) Attempts graceful termination first by delivering `CTRL_BREAK_EVENT`
@@ -391,8 +412,10 @@ is well shaped.
       silently statted. `03` §4.2, `04` §8
 - [ ] **F-18** Populates `realPath` when `resolveLinks` was set and a reparse point was
       actually traversed. `03` §4.2
-- [ ] **F-19** Computes `sha256` only when requested and only within the policy's
-      `maxHashBytes`. `03` §4.2
+- [ ] **F-19** Computes `sha256` only when requested, and returns `sha256: null` when the
+      file exceeds the policy's `limits.maxHashBytes`. Exceeding that limit is **not** an
+      error — the rest of the stat result is still returned successfully. `03` §4.2,
+      `04` §4.4
 
 ### 5.3 `fs.read`
 
@@ -435,7 +458,7 @@ is well shaped.
       otherwise. `03` §4.4
 - [ ] **F-38** With `followLinks: true`, performs cycle detection on **resolved** paths, so a
       junction pointing at its own ancestor terminates instead of looping. `03` §4.4,
-      `04` §4.4
+      `04` §4.5
 - [ ] **F-39** Honours `maxDepth`, `maxResults`, and `timeBudgetMs`, and reports which one
       truncated the result in `truncationReason`. `03` §4.4
 
@@ -501,7 +524,9 @@ Everything in this section applies only if the agent advertises `exec.start`.
 - [ ] **X-16** `exec.exit` is the **last** event for its `corr`. `03` §5.4, §8.2
 - [ ] **X-17** `exec.exit` is emitted **exactly once**, on every failure path after a
       successful spawn — timeout, cancellation, backpressure kill, and agent shutdown
-      included. `03` §5.4
+      included. The obligation is scoped to the connection: a closed connection has no
+      correlations left to satisfy, which is how a process detached under
+      `detachOnDisconnect` (O-16) is reconciled with this rule. `03` §5.4, `04` §5.7
 - [ ] **X-18** Reports `exitCode` as an unsigned 32-bit value in `0`–`4294967295` **and**
       `exitCodeSigned` as the same bits read as signed int32. `03` §5.4, §10.5
 - [ ] **X-19** `exitReason` is one of `exited`, `timeout`, `cancelled`, `killed`,
@@ -543,6 +568,12 @@ most likely to be a vulnerability rather than an inconvenience.
       `\\?\` removal from returned values. `03` §10.1
 - [ ] **W-07** Obtains the **OS-final path** with `GetFinalPathNameByHandle` or an equivalent
       before evaluating any policy rule. `03` §10.1, `04` §1.4
+- [ ] **W-60** Performs the two resolutions **in the fixed order**: lexical canonicalisation
+      including textual `..` resolution **first**, then the OS-final-path call on that result.
+      Concretely, where `junction` is a reparse point to `C:\Users`, `C:\src\junction\..`
+      resolves to `C:\src` and is inside read root `C:\src`; the reversed order yields `C:\`
+      and silently walks out of the root. The agent never applies `..` resolution to a path
+      already expanded through a reparse point. `03` §10.1
 - [ ] **W-08** Evaluates policy against that final path — resolving junctions, symlinks, and
       8.3 short names — and never against the lexical path. `03` §10.1, `04` §1.4
 - [ ] **W-09** Supports paths beyond 260 characters, and never leaks a `\\?\` prefix into a
@@ -554,7 +585,7 @@ most likely to be a vulnerability rather than an inconvenience.
       component, with or without an extension. `03` §10.1
 - [ ] **W-12** Rejects a path component with a trailing dot or a trailing space. `03` §10.1
 - [ ] **W-13** Rejects an alternate data stream — a `:` after the drive specifier — unless
-      the policy sets `allowAlternateDataStreams = true`. `03` §10.1, `04` §4.4
+      the policy sets `allowAlternateDataStreams = true`. `03` §10.1, `04` §4.5
 - [ ] **W-14** Never attempts to resolve a mapped drive letter; network locations are
       expressed in UNC form because mapped drives do not exist in session 0. `03` §10.1
 - [ ] **W-15** `isWithin(root, path)` compares **whole path components**, not string
@@ -565,8 +596,13 @@ most likely to be a vulnerability rather than an inconvenience.
 
 - [ ] **W-16** Implements the `encoding: "auto"` sniffing order exactly: BOM detection first,
       checking UTF-32LE before UTF-16LE; then a NUL-pattern examination of the first 8 KiB;
-      then a strict UTF-8 decode attempt; then the ≥1 % non-printable heuristic for binary;
-      then the policy's `defaultAnsiEncoding`. `03` §10.2
+      then a strict UTF-8 decode attempt; then the ≥1 % threshold against the textual set;
+      then the policy's `fs.defaultAnsiEncoding` (default `cp1252`). `03` §10.2, `04` §4.4
+- [ ] **W-61** Classifies binary content against the exact textual set, so that two agents
+      given the same bytes return the same verdict: `0x09`, `0x0A`, `0x0D`, `0x1B`, and
+      `0x20`–`0xFF` are textual; the remaining C0 controls and `0x7F` count against the 1 %
+      threshold; and a single `0x00` byte anywhere in the sample classifies the content as
+      binary regardless of the ratio. `03` §10.2
 - [ ] **W-17** Never translates line endings — `\r\n` in the file is `\r\n` in `data`.
       `03` §10.2
 - [ ] **W-18** Reads raw bytes from the child's pipes and decodes explicitly, rather than
@@ -655,8 +691,12 @@ most likely to be a vulnerability rather than an inconvenience.
 - [ ] **W-51** Requires `cwd` to be absolute, to exist, and to be a directory. `03` §10.7
 - [ ] **W-52** Requires `cwd` to satisfy the policy's `cwdRoots`, defaulting to the read
       roots. `03` §10.7
-- [ ] **W-53** Does not run as `LocalSystem` by default; the default deployment is a virtual
-      service account or a group-managed service account. `03` §10.8
+- [ ] **W-53** *(packaging property — inspection-only)* Does not run as `LocalSystem` **by
+      default**; the default deployment the installer produces is a virtual service account or
+      a group-managed service account. This constrains what ships, not what a running agent
+      does, so an operator can still deliberately configure a violation and no peer can
+      observe it. Check it by inspecting the installer and the shipped service definition.
+      `03` §10.8
 - [ ] **W-54** Never impersonates: no `WTSQueryUserToken` plus `CreateProcessAsUser`, no
       launching into another session. `03` §10.8
 - [ ] **W-55** An interactive `--console` mode exists, runs as the invoking user, and logs
@@ -715,8 +755,12 @@ is a remote shell with extra steps.
       before it is swapped in, so a partially applied policy is never live. `04` §2.2
 - [ ] **P-14** A failed reload keeps the previous policy, logs at error level, and continues
       serving. `04` §2.2
-- [ ] **P-15** (SHOULD) A failed reload is reflected in the next handshake summary.
-      `04` §2.2
+- [ ] **P-15** A failed reload sets `policy.state = "stale"` from then on, including in the
+      next handshake summary. `"ok"` would hide from the operator that their edit never took
+      effect, and `"invalid"` would be false while the agent is serving normally. `04` §2.2
+- [ ] **P-59** While `state` is `"stale"`, `policyHash` names the policy that is **loaded**,
+      not the file on disk — comparing the two is how an operator detects the failed reload.
+      `04` §2.2, §7
 - [ ] **P-16** (SHOULD) Checks the policy file's ACL at load and warns when it is writable by
       a non-administrative principal, including the agent's own account. `04` §2.1
 
@@ -732,7 +776,7 @@ is a remote shell with extra steps.
 - [ ] **P-21** `denyGlobs` use the same minimal glob dialect as `fs.glob`. `04` §4.2
 - [ ] **P-22** `rootOverrides.allowedExtensions`, when present, restricts reads under that
       root to those extensions, as a case-insensitive allowlist. `04` §4.3
-- [ ] **P-23** `followLinks` and `allowAlternateDataStreams` default to `false`. `04` §4.4
+- [ ] **P-23** `followLinks` and `allowAlternateDataStreams` default to `false`. `04` §4.5
 
 ### 8.4 Execution rules
 
@@ -796,7 +840,8 @@ reviewer approves everything, because stage 1 is the floor.
 
 - [ ] **P-48** The handshake carries a summary and **never** the full policy. `04` §7
 - [ ] **P-49** The summary includes at least `policyVersion`, `policyHash`, `state`,
-      `readRoots`, `execMode`, `writeEnabled`, and `denialDisclosure`. `04` §7
+      `readRoots`, `execMode`, `writeEnabled`, and `denialDisclosure`, with `state` drawn from
+      `"ok"`, `"invalid"`, `"stale"`. `04` §7, §2.2
 - [ ] **P-50** `policyHash` is `sha256:` of the file bytes, so the operator can confirm what
       is live. `04` §7
 - [ ] **P-51** Only allow-rule **ids** are ever disclosed, never rule bodies. `04` §7
@@ -860,10 +905,15 @@ reviewer approves everything, because stage 1 is the floor.
       block a twenty-millisecond directory listing. `03` §8.1
 - [ ] **C-02** Does not assume responses arrive in request order; a receiver never relies on
       FIFO. `03` §8.2
-- [ ] **C-03** Delivers events sharing a `corr` in `seq` order, gapless, starting at 0.
-      `03` §8.2
-- [ ] **C-04** On detecting a gap in `seq`, **fails that request** rather than proceeding with
-      missing output. `03` §8.2
+- [ ] **C-03** Delivers events sharing a `corr` in `seq` order, gapless, starting at 0. Each
+      direction has its own independent sequence space for a given `corr`: the agent numbers
+      the events it sends, and the server numbers `exec.ack` separately. `03` §8.2, §5.3
+- [ ] **C-04** (server) On detecting a gap in `seq` **in the agent's event stream**, fails
+      that request rather than proceeding with missing output. This rule binds the server
+      only, because output is data that cannot be reconstructed. `03` §8.2
+- [ ] **C-12** A lost, duplicated, or reordered `exec.ack` never causes the agent to fail
+      anything: acknowledgements are cumulative, the next one supersedes the last, and the
+      gap rule of C-04 explicitly does **not** apply to them. `03` §8.2, §9.3
 - [ ] **C-05** Rejects a request that would exceed `maxConcurrentRequests` or
       `maxConcurrentProcesses` with `AGENT_BUSY`, rather than queueing it unboundedly.
       `03` §8.3
@@ -941,6 +991,12 @@ replaying a transcript. Fuller operational guidance is in
 - [ ] **O-11** Applies `logging.redactPatterns` to captured output before writing it. `04` §9
 - [ ] **O-12** Audits filesystem reads at the verbosity `fs.auditReads` selects — path, byte
       count, decision. `04` §9
+- [ ] **O-16** A process detached under `detachOnDisconnect` is written to the audit log on
+      completion **exactly as an attached one would be** — exit code, reason, duration, byte
+      counts — carrying a marker that it was detached and the identifier of the session it
+      outlived. No `exec.exit` is owed, because correlations are per-connection and the server
+      already failed the request with `AGENT_DISCONNECTED`; the audit entry is the only record
+      anyone will ever get. `04` §5.7
 
 ### 12.3 Deployment
 
@@ -964,8 +1020,8 @@ implementation must be able to produce and consume every message in them — see
 | Transcript | Behaviours exercised | Checklist items principally covered |
 |---|---|---|
 | [`transcript-happy-path.jsonl`](examples/transcript-happy-path.jsonl) | Handshake with version negotiation and limit intersection; application-level heartbeat with nonce echo; a paged, sorted directory listing with truncation; a tail read of a 17 GiB log with encoding sniffing; an `exec.start` with argv quoting, interleaved stdout and stderr, credit-window acks, and a clean `exec.exit`; graceful `session.bye` and close `1001` | S-01…S-18, F-01…F-15, F-24, F-27, X-08…X-19, B-01…B-06, E-01…E-18 |
-| [`transcript-policy-denial.jsonl`](examples/transcript-policy-denial.jsonl) | Denial by deny glob; denial for a path outside every read root; the **junction escape**, where a lexically-inside path resolves to `C:\Users`; denial by an exec deny rule with no process ever created; a stage-2 model review that emits `policy.reviewing` and then denies with `reasonSource: "model"`; a contrasting `ACCESS_DENIED` from a Windows ACL; a rejected lookahead in `fs.grep` | P-01…P-05, P-17…P-21, P-37…P-45, P-52…P-58, W-07, W-08, W-15, F-41, X-11 |
-| [`transcript-cancel-timeout.jsonl`](examples/transcript-cancel-timeout.jsonl) | `session.cancel` acknowledged then followed by exactly one terminal `exec.exit`; `CTRL_BREAK_EVENT` grace period then job-object kill of a four-process tree; a timeout that preserves captured output; an output cap reached with `dropped: true` and `truncationReason` set | S-19…S-23, X-16…X-23, C-09, B-07, B-08, W-31, W-33 |
+| [`transcript-policy-denial.jsonl`](examples/transcript-policy-denial.jsonl) | Denial by deny glob; denial for a path outside every read root; the **junction escape**, where a lexically-inside path resolves to `C:\Users`; denial by an exec deny rule with no process ever created; a stage-2 model review that emits `policy.reviewing` and then denies with `reasonSource: "model"`; a contrasting `ACCESS_DENIED` from a Windows ACL; a rejected lookahead in `fs.grep` | P-01…P-05, P-17…P-21, P-37…P-45, P-52…P-58, W-07, W-08, W-15, W-60, F-41, X-11 |
+| [`transcript-cancel-timeout.jsonl`](examples/transcript-cancel-timeout.jsonl) | `session.cancel` acknowledged then followed by exactly one terminal `exec.exit`; `CTRL_BREAK_EVENT` grace period then job-object kill of a four-process tree; a timeout that preserves captured output; an output cap reached with `dropped: true` and `truncationReason` set | S-19…S-23, S-30…S-32, X-16…X-23, C-09, B-07, B-08, W-31, W-33 |
 | [`transcript-reconnect.jsonl`](examples/transcript-reconnect.jsonl) | Heartbeat failure and dead-peer detection on both sides; in-flight requests failed rather than hung; job-object cleanup on disconnect; a fresh session with `resumeOf` granting nothing; eviction of an incumbent by a newer connection with `bySessionId` stitching; a restart with a broken policy that connects and then refuses everything with `POLICY_UNAVAILABLE` | O-01…O-05, S-12, S-25…S-29, P-06…P-09, C-08 |
 
 ### 13.1 What the harness does with them
@@ -1002,6 +1058,7 @@ them has been chosen because a plausible, reasonable-looking implementation gets
 | Item | The requirement | What a mistake costs |
 |---|---|---|
 | **W-07, W-08, P-05** | Policy is evaluated against the **OS-final path**, after junction, symlink, and 8.3 short-name resolution | `C:\src\link` is a junction to `C:\Users`. `C:\PROGRA~1` is `C:\Program Files`. Neither is visible to string manipulation, so a lexical check reads the whole disk while looking correct in every test the implementer thought to write. This is the single most likely security hole in a naive agent. |
+| **W-60** | Lexical `..` resolution runs **first**, the final-path call **second**, on its result | The two orders are not equivalent and the difference is exploitable. `C:\src\junction\..` gives `C:\src` under the required order and `C:\` under the reversed one — an agent that resolves the reparse point before the `..` walks out of the read root while performing both of the individually-correct steps. An agent can pass every W-07 test and still fail here. |
 | **W-15, P-18** | Containment is tested **component-wise**, not by string prefix | `startsWith("C:\src")` also matches `C:\src2`, `C:\src-backup`, and `C:\srcret`. An attacker who can create a sibling directory gets a read root the operator never granted. |
 | **W-10** | All policy comparison is **ordinal, culture-invariant, case-insensitive** | A culture-aware comparison brings the Turkish dotless-i into an authorization decision, so whether a path matches a root depends on the machine's locale. Security decisions must not be locale-dependent. |
 | **W-36…W-41** | MSVCRT quoting rules implemented **exactly** | Get the backslash-before-quote rule wrong and an argument containing `"` breaks out of its quoting, appending attacker-controlled tokens to the command line. This is argument injection, and the allowlist that validated the argv does not see it because the corruption happens after validation. |
@@ -1034,22 +1091,25 @@ the following.
 |---|---|---|---|
 | 1 | `mklink /J C:\src\shortcut C:\Users` | `fs.list` on `C:\src\shortcut` | `POLICY_DENIED`. The lexical path is inside the root; the final path is `C:\Users`. If this succeeds you have skipped W-07. |
 | 2 | — | `fs.read` on `C:\PROGRA~1\...` when `C:\Program Files` is outside every root | `POLICY_DENIED`. 8.3 short names are resolved by `GetFinalPathNameByHandle` and by nothing else. |
-| 3 | — | `fs.read` on `C:\src\..\Windows\win.ini` | `POLICY_DENIED`, after lexical `..` resolution puts the path outside the root. Verify separately that `..` resolution happens **before** the final-path call, not instead of it. |
-| 4 | — | `fs.stat` on `C:\src\CON`, `C:\src\NUL.txt`, `C:\src\COM1` | `INVALID_PATH`. Reserved device names are rejected as a component, with or without an extension. |
-| 5 | — | `fs.read` on `C:\src\notes.txt:hidden` | `INVALID_PATH` while `allowAlternateDataStreams` is false. An ADS is a place data hides from every directory listing you will look at. |
-| 6 | — | `exec.start` with `env: {"PATH": "C:\\attacker"}` while `envAllowSensitive` is false | `POLICY_DENIED` or `INVALID_ARGUMENT`. Then repeat with `Path` and with `pAtH` — the check is case-insensitive or it is not a check. |
-| 7 | — | `exec.start` with `argv: ["git.exe", "status"]` where `git.exe` exists on the ambient `PATH` but not on `executableSearchPath` | `EXEC_NOT_FOUND`. If it runs, you resolved against `PATH`. |
-| 8 | — | `exec.start` with `shell: "cmd"` and `commandLine: "tasklist & whoami"` | `POLICY_DENIED` or `INVALID_ARGUMENT` for the `&`. Repeat with `\|`, `>`, `^`, `%`, and with an odd number of `"`. |
-| 9 | — | `exec.start` with `shell: "none"` and `argv: ["C:\\src\\build.bat"]` | `EXEC_NOT_FOUND`, with a message pointing at `shell: "cmd"`. |
-| 10 | Allow rule pins `argv = ["query", "{service}"]` | `exec.start` with `argv: ["query", "spooler\" & whoami & \""]` | Denied by the placeholder regex. Then inspect `commandLineUsed` on a legitimate call and confirm the quoting matches the `03` §10.4 table exactly. |
-| 11 | Read root `C:\src` exists | `fs.list` on `C:\src2` (create it) | `POLICY_DENIED`. This is the `startsWith` bug, and it is the one people are most surprised to still have. |
-| 12 | Deny glob `**\*.pem` | `fs.read` on `C:\src\certs\server.pem` | `POLICY_DENIED` naming the deny glob, even though the path is inside an allowed root. Deny is evaluated after allow and wins. |
-| 13 | Shell rule with `scriptPatterns = ['^Get-Service$']` | `exec.start` with `shell: "powershell"` and script `Get-Service; Remove-Item -Recurse C:\` | `POLICY_DENIED`. The **entire** script must match, which is why anchoring is enforced at load. |
-| 14 | Break `policy.toml` with a syntax error and restart the agent | Any request at all | The agent connects, reports `state: "invalid"`, and returns `POLICY_UNAVAILABLE` with the file and location in the message. It does not exit, and it does not serve a default. |
-| 15 | Stage 2 configured with an endpoint that never responds, `failMode = "closed"` | A command that stage 1 allows | `POLICY_DENIED`, logged at warning level and written to the audit trail. Then set `failMode = "open"` and confirm the fallback is *still* logged and audited. |
-| 16 | — | A `req` reusing an `id` already used on this connection | `INVALID_ARGUMENT` naming the duplicate. This is what stands between a server retry bug and a command running twice. |
-| 17 | — | Kill the agent process mid-`exec.start` | Every child process is reaped by the job object, and the server fails the in-flight request rather than hanging. |
-| 18 | — | Send a WebSocket **binary** frame containing a valid WSAP/1 message | Rejected. Binary is reserved for a future wire version; parsing it anyway is how a v1 agent becomes accidentally incompatible with v2. |
+| 3 | — | `fs.read` on `C:\src\..\Windows\win.ini` | `POLICY_DENIED`, after lexical `..` resolution puts the path outside the root. |
+| 4 | `mklink /J C:\src\junction C:\Users` | `fs.list` on `C:\src\junction\..` | **Permitted**, resolving to `C:\src`. This is the one case in the table that must *succeed*, and it is the sharpest test of ordering: an agent that calls the final-path function before resolving `..` gets `C:\Users\..` → `C:\` and either denies a legitimate request or, with a root nearer the drive root, grants an illegitimate one. Run it alongside case 1, which uses the same junction and must be denied. |
+| 5 | — | `fs.stat` on `C:\src\CON`, `C:\src\NUL.txt`, `C:\src\COM1` | `INVALID_PATH`. Reserved device names are rejected as a component, with or without an extension. |
+| 6 | — | `fs.read` on `C:\src\notes.txt:hidden` | `INVALID_PATH` while `allowAlternateDataStreams` is false. An ADS is a place data hides from every directory listing you will look at. |
+| 7 | — | `exec.start` with `env: {"PATH": "C:\\attacker"}` while `envAllowSensitive` is false | `POLICY_DENIED` or `INVALID_ARGUMENT`. Then repeat with `Path` and with `pAtH` — the check is case-insensitive or it is not a check. |
+| 8 | — | `exec.start` with `argv: ["git.exe", "status"]` where `git.exe` exists on the ambient `PATH` but not on `executableSearchPath` | `EXEC_NOT_FOUND`. If it runs, you resolved against `PATH`. |
+| 9 | — | `exec.start` with `shell: "cmd"` and `commandLine: "tasklist & whoami"` | `POLICY_DENIED` or `INVALID_ARGUMENT` for the `&`. Repeat with `\|`, `>`, `^`, `%`, and with an odd number of `"`. |
+| 10 | — | `exec.start` with `shell: "none"` and `argv: ["C:\\src\\build.bat"]` | `EXEC_NOT_FOUND`, with a message pointing at `shell: "cmd"`. |
+| 11 | Allow rule pins `argv = ["query", "{service}"]` | `exec.start` with `argv: ["query", "spooler\" & whoami & \""]` | Denied by the placeholder regex. Then inspect `commandLineUsed` on a legitimate call and confirm the quoting matches the `03` §10.4 table exactly. |
+| 12 | Read root `C:\src` exists | `fs.list` on `C:\src2` (create it) | `POLICY_DENIED`. This is the `startsWith` bug, and it is the one people are most surprised to still have. |
+| 13 | Deny glob `**\*.pem` | `fs.read` on `C:\src\certs\server.pem` | `POLICY_DENIED` naming the deny glob, even though the path is inside an allowed root. Deny is evaluated after allow and wins. |
+| 14 | Shell rule with `scriptPatterns = ['^Get-Service$']` | `exec.start` with `shell: "powershell"` and script `Get-Service; Remove-Item -Recurse C:\` | `POLICY_DENIED`. The **entire** script must match, which is why anchoring is enforced at load. |
+| 15 | Break `policy.toml` with a syntax error and restart the agent | Any request at all | The agent connects, reports `state: "invalid"`, and returns `POLICY_UNAVAILABLE` with the file and location in the message. It does not exit, and it does not serve a default. |
+| 16 | Break `policy.toml` **without** restarting, so hot reload rejects it | Any request, then a fresh handshake | The request is served under the **previous** policy, and `state` is `"stale"` with `policyHash` naming the loaded policy rather than the file on disk. Contrast with case 15: same broken file, different state, because one has a policy to fall back to and the other does not. |
+| 17 | Stage 2 configured with an endpoint that never responds, `failMode = "closed"` | A command that stage 1 allows | `POLICY_DENIED`, logged at warning level and written to the audit trail. Then set `failMode = "open"` and confirm the fallback is *still* logged and audited. |
+| 18 | — | A `req` reusing an `id` already used on this connection | `INVALID_ARGUMENT` naming the duplicate. This is what stands between a server retry bug and a command running twice. |
+| 19 | — | `session.cancel` delivered in the window between the spawn and the `res exec.start` | `res exec.start` arrives first carrying the real `pid` and `commandLineUsed`, then `exec.exit` with `exitReason: "cancelled"`. Getting a bare `err CANCELLED` here means the audit log will never record what ran. Provoke it by cancelling immediately after issuing a command that spawns slowly. |
+| 20 | — | Kill the agent process mid-`exec.start` | Every child process is reaped by the job object, and the server fails the in-flight request rather than hanging. |
+| 21 | — | Send a WebSocket **binary** frame containing a valid WSAP/1 message | Rejected. Binary is reserved for a future wire version; parsing it anyway is how a v1 agent becomes accidentally incompatible with v2. |
 
 A useful habit while working through these: for each denial, read the audit record it
 produced and ask whether an operator who had never seen the request could tell from that
