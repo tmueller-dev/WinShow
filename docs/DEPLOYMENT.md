@@ -12,7 +12,7 @@ is a second thing to get out of date.
 
 ## 1. The image
 
-Published to the GitHub Container Registry on every version tag:
+Published to the GitHub Container Registry by CI:
 
 ```sh
 docker pull ghcr.io/tmueller-dev/winshow:latest
@@ -20,6 +20,12 @@ docker pull ghcr.io/tmueller-dev/winshow:latest
 
 Tags follow the git tag: `v1.2.3` publishes `1.2.3`, `1.2`, `1`, `latest`, and a
 `sha-<commit>` tag. Pin to a full version in production; `latest` is for trying it out.
+
+Every push to `main` additionally publishes **`edge`** — the current state of the branch,
+explicitly not a release. It exists so the registry is never empty while waiting for
+somebody to cut a tag. `edge` never moves `latest`, so pulling `latest` still gets you a
+released version. Both are built only after ruff, mypy, the test suite and the
+documentation contract check have passed on that commit.
 
 The image is `python:3.12-slim` carrying a virtual environment and nothing else. It runs
 as an unprivileged account (uid 10001) with no shell and no home directory, because the

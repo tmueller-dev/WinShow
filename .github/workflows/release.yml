@@ -2,11 +2,18 @@ name: Release
 
 # Publishes the container image to the GitHub Container Registry.
 #
-# Triggered by a version tag, or by hand. Tagging is what marks a commit as intended for
-# consumption; building every push to main would publish work that has not been decided
-# to be a release.
+# Two triggers, publishing two different things.
+#
+# A version tag publishes a release: semver tags plus `latest`. Tagging is what marks a
+# commit as intended for consumption.
+#
+# A push to main publishes `edge` — the current state of the branch, explicitly not a
+# release. Without it nothing would exist in the registry until somebody cut the first
+# tag, and "the image is published by CI" would be true only in principle. `edge` never
+# moves `latest`, so pulling `latest` still gets you a released version.
 on:
   push:
+    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
     inputs:
@@ -25,9 +32,28 @@ permissions:
   contents: read
 
 jobs:
+  verify:
+    name: Verify before publishing
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - run: python -m ruff check src tests
+      - run: python -m mypy
+      - run: python -m pytest -q
+      - run: python tools/validate-docs.py
+
   publish:
     name: Build and push to GHCR
     runs-on: ubuntu-latest
+    # Publishing follows the checks rather than racing them. CI runs the same steps on
+    # every push, but a tag can point at any commit, so the gate has to be here too:
+    # an image nobody has linted or tested is not worth putting in a registry.
+    needs: [verify]
     permissions:
       contents: read
       packages: write
@@ -60,6 +86,7 @@ jobs:
             type=semver,pattern={{major}}
             type=sha,format=long
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=edge,enable=${{ github.ref == 'refs/heads/main' }}
             type=raw,value=${{ inputs.tag }},enable=${{ inputs.tag != '' }}
           labels: |
             org.opencontainers.image.licenses=AGPL-3.0-or-later
